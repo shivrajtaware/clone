@@ -42,6 +42,7 @@ const importHeaderAliases = {
   'unit': 'unit', 'base unit': 'unit', 'loose unit': 'unit', 'uom': 'unit',
   'pack': 'pack_unit', 'pack unit': 'pack_unit', 'packing': 'pack_unit', 'container': 'pack_unit',
   'units per pack': 'units_per_pack', 'pack size': 'units_per_pack', 'packing qty': 'units_per_pack', 'strip size': 'units_per_pack',
+  'batch number optional': 'batch_no', 'batch no optional': 'batch_no',
   'order quantity': 'reorder_quantity', 'order qty': 'reorder_quantity', 'default order qty': 'reorder_quantity', 'suggested order qty': 'reorder_quantity',
   'batch': 'batch_no', 'batch no': 'batch_no', 'batch number': 'batch_no', 'lot': 'batch_no', 'lot no': 'batch_no',
   'mfg': 'mfg_date', 'mfg date': 'mfg_date', 'manufacturing date': 'mfg_date',
@@ -70,6 +71,8 @@ const normalizeImportRow = (row) => Object.entries(row || {}).reduce((acc, [key,
 }, {});
 const requiredText = (row, key, errors) => {
   const value = norm(row[key]);
+  if (!value && key === 'generic_name') return norm(row.brand_name) || `Imported Medicine ${rowNumber(row)}`;
+  if (!value && key === 'batch_no') return `OPENING-${rowNumber(row)}-${Date.now()}`;
   if (!value) errors.push(`Row ${rowNumber(row)}: ${key} is required`);
   return value;
 };
@@ -125,7 +128,8 @@ const purchaseTaxFields = ({ quantity, packQuantity = 0, looseQuantity = 0, unit
   const packQty = Math.max(0, Number(packQuantity || 0));
   const looseQty = Math.max(0, Number(looseQuantity || 0));
   const packSizeValue = Math.max(1, Number(unitsPerPack || 1));
-  const hasPurchaseData = [costPrice, taxableRate, cgstAmt, sgstAmt, igstAmt, purchaseTotal].some(value => value !== null && value !== undefined && value !== '');
+  const hasPurchaseData = [costPrice, taxableRate, cgstAmt, sgstAmt, igstAmt, purchaseTotal]
+    .some(value => value !== null && value !== undefined && value !== '' && Number(value) !== 0);
   if (!hasPurchaseData) {
     return {
       taxable_rate: null,
@@ -633,8 +637,7 @@ router.post('/inventory/import', async (req, res) => {
       errors.push(`Row ${rowNumber(r)}: ${e.message}`);
     }
 
-    const itemName = norm(r.generic_name) || norm(r.brand_name);
-    if (!itemName) errors.push(`Row ${rowNumber(r)}: medicine name or brand name is required`);
+    const itemName = norm(r.generic_name) || norm(r.brand_name) || `Imported Medicine ${rowNumber(r)}`;
     const item = {
       generic_name: itemName,
       brand_name: norm(r.brand_name),
@@ -655,7 +658,7 @@ router.post('/inventory/import', async (req, res) => {
       item,
       key: [item.generic_name, item.brand_name, item.strength, item.form].map(normKey).join('|'),
       batch: {
-        batch_no: requiredText(r, 'batch_no', errors),
+        batch_no: norm(r.batch_no) || `OPENING-${rowNumber(r)}-${Date.now()}`,
         mfg_date: optionalImportDate(r, 'mfg_date', errors, false),
         expiry_date: expiry,
         quantity_in: quantity,
@@ -785,6 +788,26 @@ router.post('/inventory/:id/batch', async (req, res) => {
     return created;
   });
   res.status(201).json({ success: true, data: batch });
+});
+
+router.patch('/inventory/:id/batches/:batchId', async (req, res) => {
+  const { batch_no } = req.body;
+  const cleanBatchNo = norm(batch_no);
+  if (!cleanBatchNo) throw new HttpError(400, 'Batch number is required');
+  const batch = await prisma.$transaction(async (tx) => {
+    const item = await tx.pharmacyItem.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId } });
+    if (!item) throw new HttpError(404, 'Medicine not found');
+    const existing = await tx.drugBatch.findFirst({
+      where: { item_id: req.params.id, batch_no: cleanBatchNo, id: { not: req.params.batchId } },
+    });
+    if (existing) throw new HttpError(409, 'This batch number already exists for this medicine');
+    const before = await tx.drugBatch.findFirst({ where: { id: req.params.batchId, item_id: req.params.id } });
+    if (!before) throw new HttpError(404, 'Batch not found');
+    const updated = await tx.drugBatch.update({ where: { id: req.params.batchId }, data: { batch_no: cleanBatchNo } });
+    await audit(tx, req, 'BATCH_NUMBER_UPDATED', updated.id, { batch_no: updated.batch_no }, { batch_no: before.batch_no });
+    return updated;
+  });
+  res.json({ success: true, data: batch });
 });
 
 router.post('/inventory/:id/adjust', async (req, res) => {

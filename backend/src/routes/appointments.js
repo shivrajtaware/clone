@@ -86,7 +86,7 @@ router.get('/', async (req, res) => {
   const [appointments, total] = await Promise.all([
     prisma.appointment.findMany({
       where, skip, take: parseInt(limit),
-      orderBy: [{ appointment_date: 'asc' }, { slot_time: 'asc' }],
+      orderBy: [{ appointment_date: 'asc' }, { token_no: 'asc' }],
       include: {
         patient: { select: { id: true, uhid: true, first_name: true, last_name: true, phone: true, gender: true, dob: true } },
         doctor: { select: { id: true, first_name: true, last_name: true, designation: true } },
@@ -108,21 +108,12 @@ router.post('/', async (req, res) => {
   data.appointment_date = apptDate;
   data.type = data.type || 'REGULAR';
   data.priority = data.priority || 'NORMAL';
-  data.status = 'BOOKED';
+  const isWalkIn = req.body.walk_in === true || req.body.walk_in === 'true';
+  data.status = isWalkIn ? 'CHECKED_IN' : 'BOOKED';
+  if (isWalkIn) data.checked_in_at = new Date();
   data.booked_by = req.user.id;
-  requireFields(data, ['patient_id', 'doctor_id', 'appointment_date', 'slot_time']);
-
-  // ✓ Check double-booking BEFORE creation
-  const slotExists = await prisma.appointment.findFirst({
-    where: {
-      hospital_id: req.hospitalId,
-      doctor_id: data.doctor_id,
-      appointment_date: data.appointment_date,
-      slot_time: data.slot_time,
-      status: { in: ['BOOKED', 'CONFIRMED', 'CHECKED_IN'] }
-    }
-  });
-  if (slotExists) return res.status(400).json({ success: false, message: 'This slot is already booked. Please select another time.' });
+  data.slot_time = optionalText(data.slot_time) || (isWalkIn ? 'WALK_IN' : 'QUEUE');
+  requireFields(data, ['patient_id', 'doctor_id', 'appointment_date']);
 
   // Get token number for today
   const todayStart = new Date(apptDate);
@@ -136,15 +127,6 @@ router.post('/', async (req, res) => {
     include: { doctor_profile: true },
   });
   if (!doctor) badRequest('Selected doctor is not available');
-  const slotDuration = doctor.doctor_profile?.slot_duration_mins || 15;
-  const timeMatch = /^(\d{2}):(\d{2})$/.exec(data.slot_time || '');
-  const slotMinutes = timeMatch ? Number(timeMatch[1]) * 60 + Number(timeMatch[2]) : NaN;
-  const isClinicSlot = Number.isInteger(slotMinutes)
-    && slotMinutes >= 9 * 60
-    && slotMinutes < 18 * 60
-    && !(slotMinutes >= 13 * 60 && slotMinutes < 14 * 60)
-    && (slotMinutes - 9 * 60) % slotDuration === 0;
-  if (!isClinicSlot) badRequest(`Choose an available ${slotDuration}-minute clinic time slot.`);
   const configuredConsultation = await prisma.serviceFee.findFirst({
     where: { hospital_id: req.hospitalId, trigger_code: 'CONSULTATION', is_active: true },
     orderBy: { updated_at: 'desc' },

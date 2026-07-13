@@ -168,17 +168,7 @@ export default function AppointmentsPage() {
   })
   const labTests = []
 
-  const watchDoctor = watch('doctor_id')
-  const watchDate   = watch('appointment_date')
-  const watchSlot   = watch('slot_time')
   const patientSearch = watch('patient_id') || ''
-
-  const { data: slots } = useQuery({
-    queryKey: ['slots', watchDoctor, watchDate],
-    queryFn: () => api.get('/appointments/slots', { params: { doctor_id: watchDoctor, date: watchDate } }).then(r => r.data.data),
-    enabled: !!watchDoctor && !!watchDate,
-  })
-  const selectedSlot = (slots || []).find(slot => slot.time === watchSlot)
 
   const { data: patientSuggestions, isFetching: patientsFetching } = useQuery({
     queryKey: ['patient-search', patientSearch],
@@ -391,12 +381,12 @@ export default function AppointmentsPage() {
         appts.length === 0 ? <EmptyState icon="📅" title="No appointments" description="No appointments scheduled for this date." action={<button className="btn-primary mt-2" onClick={() => { setValue('appointment_date', date); setShowModal(true) }}>+ Book Appointment</button>} /> : (
           <div className="overflow-x-auto">
             <table className="tbl">
-              <thead><tr><th>Token</th><th>Time</th><th>Patient</th><th>Doctor</th><th>Department</th><th>Type</th><th>Status</th><th>Actions</th></tr></thead>
+              <thead><tr><th>Token</th><th>Queue</th><th>Patient</th><th>Doctor</th><th>Department</th><th>Type</th><th>Status</th><th>Actions</th></tr></thead>
               <tbody>
                 {appts.map(a => (
                   <tr key={a.id}>
                     <td><span className="badge badge-cyan font-mono">{a.token_no}</span></td>
-                    <td className="font-medium text-cyan text-xs">{a.slot_time}</td>
+                    <td className="font-medium text-cyan text-xs">{a.slot_time === 'WALK_IN' ? 'Walk-in' : 'Queue'}</td>
                     <td>
                       <div className="text-xs font-medium text-white">{a.patient?.first_name} {a.patient?.last_name}</div>
                       <div className="text-[10px] text-slate-400">{a.patient?.uhid} · {a.patient?.phone}</div>
@@ -714,21 +704,11 @@ export default function AppointmentsPage() {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="label">Time Slot *</label>
-              <input
-                type="time"
-                className="input"
-                min="09:00"
-                max="17:45"
-                step="900"
-                disabled={!watchDoctor || !watchDate}
-                {...register('slot_time', { required: true })}
-              />
-              {watchDoctor && watchDate && watchSlot && (
-                <p className={`mt-1 text-[11px] ${selectedSlot?.available ? 'text-emerald-400' : 'text-brand-red'}`}>
-                  {selectedSlot?.available ? 'Available' : 'Choose an available 15-minute clinic slot.'}
-                </p>
-              )}
+              <label className="label">Queue Type</label>
+              <select className="select" {...register('walk_in')}>
+                <option value="">Advance booking</option>
+                <option value="true">Direct walk-in</option>
+              </select>
             </div>
             <div>
               <label className="label">Visit Type</label>

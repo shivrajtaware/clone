@@ -130,11 +130,11 @@ export default function DashboardPage() {
             <p className="text-sm text-slate-400 py-4 text-center">No appointments today</p>
           ) : (
             <table className="tbl">
-              <thead><tr><th>Time</th><th>Patient</th><th>Doctor</th><th>Status</th></tr></thead>
+              <thead><tr><th>Token</th><th>Patient</th><th>Doctor</th><th>Status</th></tr></thead>
               <tbody>
                 {(d.todayAppts || []).slice(0, 6).map(a => (
                   <tr key={a.id}>
-                    <td className="text-cyan font-medium text-xs">{a.slot_time}</td>
+                    <td className="text-cyan font-medium text-xs">{a.token_no || '-'}</td>
                     <td className="text-xs">{a.patient?.first_name} {a.patient?.last_name}</td>
                     <td className="text-xs text-slate-400">Dr. {a.doctor?.last_name}</td>
                     <td><Badge status={a.status} /></td>

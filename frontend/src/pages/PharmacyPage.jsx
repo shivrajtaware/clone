@@ -69,6 +69,8 @@ const importHeaderAliases = {
   'packing qty': 'units_per_pack',
   'strip size': 'units_per_pack',
   'units per container': 'units_per_pack',
+  'batch number optional': 'batch_no',
+  'batch no optional': 'batch_no',
   'prescription controlled': 'is_controlled',
   'is controlled': 'is_controlled',
   'cold chain': 'is_cold_chain',
@@ -151,7 +153,8 @@ const normalizeHeader = (header) => {
   const key = String(header || '').trim().toLowerCase().replace(/_/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim()
   return importHeaderAliases[key] || key.replace(/\s+/g, '_')
 }
-const requiredImportFields = ['batch_no', 'expiry_date', 'mrp', 'selling_price', 'gst_pct']
+const hiddenImportFields = new Set(['', 'unit', 'rack_location', 'supplier_name', 'supplier_phone', 'supplier_gstin', 'supplier_drug_license'])
+const requiredImportFields = ['expiry_date', 'mrp', 'selling_price', 'gst_pct']
 const reviewImportFields = ['generic_name', 'brand_name', 'category', 'form', 'strength', 'pack_unit', 'units_per_pack', 'batch_no', 'mfg_date', 'expiry_date', 'pack_quantity', 'loose_quantity', 'mrp', 'selling_price', 'cost_price', 'taxable_rate', 'gst_pct', 'cgst_amt', 'sgst_amt', 'igst_amt', 'purchase_total']
 const importColumnLabels = {
   generic_name: 'Medicine',
@@ -164,7 +167,7 @@ const importColumnLabels = {
   loose_quantity: 'Qty Bought (Loose)',
   mrp: 'MRP',
   selling_price: 'Selling Price *',
-  cost_price: 'Purchase Rate/Pack',
+  cost_price: 'Purchase Rate/Pack (Optional)',
   taxable_rate: 'Taxable Amount',
   gst_pct: 'GST %',
   cgst_amt: 'CGST',
@@ -184,7 +187,7 @@ const rowsToObjects = (rows) => {
   return rows.slice(headerIndex + 1)
     .filter(values => values.some(v => String(v).trim() !== ''))
     .map((values, index) => ({
-      ...Object.fromEntries(headers.map((h, i) => [h, values[i] ?? ''])),
+      ...Object.fromEntries(headers.map((h, i) => [h, values[i] ?? '']).filter(([h]) => h && !hiddenImportFields.has(h))),
       __row: headerIndex + index + 2,
     }))
 }
@@ -192,10 +195,10 @@ const inferImportRow = (row) => {
   const text = [row.generic_name, row.brand_name, row.strength, row.form].map(v => String(v || '')).join(' ')
   const low = normalizeDrugText(text)
   const form = row.form || forms.find(f => low.includes(normalizeDrugText(f))) || 'Other'
-  const unit = row.unit || inferredLooseUnit({ form, strength: row.strength })
   const packUnit = row.pack_unit || (['tablet', 'capsule'].includes(normalizedDrugForm(form)) ? 'strip' : 'pack')
   const units = row.units_per_pack || (['tablet', 'capsule'].includes(normalizedDrugForm(form)) ? 10 : 1)
-  return { ...row, form, unit, pack_unit: packUnit, units_per_pack: units }
+  const { unit, ...rest } = row
+  return { ...rest, form, pack_unit: packUnit, units_per_pack: units }
 }
 
 const parseCsv = (text) => {
@@ -233,6 +236,7 @@ export default function PharmacyPage() {
   const [statusFilter, setStatusFilter] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
   const [showBatchModal, setShowBatchModal] = useState(false)
+  const [showBatchNoModal, setShowBatchNoModal] = useState(false)
   const [showAdjustModal, setShowAdjustModal] = useState(false)
   const [showSupplierModal, setShowSupplierModal] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
@@ -244,6 +248,7 @@ export default function PharmacyPage() {
   const [dispenseRows, setDispenseRows] = useState([])
   const [rxPayment, setRxPayment] = useState({ payment_method: 'CASH', payment_reference: '' })
   const [selectedItem, setSelectedItem] = useState(null)
+  const [selectedBatch, setSelectedBatch] = useState(null)
   const [receipt, setReceipt] = useState(null)
   const [reportType, setReportType] = useState('gst')
   const [walkInCustomer, setWalkInCustomer] = useState({ name: '', phone: '', gstin: '', payment_method: 'CASH', payment_reference: '', discount_pct: 0, received_amt: '' })
@@ -265,6 +270,7 @@ export default function PharmacyPage() {
 
   const itemForm = useForm({ defaultValues: { category: 'OTHER', form: 'Other', unit: 'unit', pack_unit: 'pack', units_per_pack: 1, min_stock_level: 10, max_stock_level: 1000, reorder_quantity: 100 } })
   const batchForm = useForm()
+  const batchNoForm = useForm()
   const adjustForm = useForm({ defaultValues: { type: 'ADJUSTMENT' } })
   const supplierForm = useForm()
 
@@ -323,6 +329,11 @@ export default function PharmacyPage() {
   const batchMut = useMutation({
     mutationFn: ({ id, ...d }) => api.post(`/pharmacy/inventory/${id}/batch`, d),
     onSuccess: () => { toast.success('Batch received'); invalidate(); setShowBatchModal(false); batchForm.reset() },
+  })
+  const batchNoMut = useMutation({
+    mutationFn: ({ item_id, batch_id, batch_no }) => api.patch(`/pharmacy/inventory/${item_id}/batches/${batch_id}`, { batch_no }),
+    onSuccess: () => { toast.success('Batch number saved'); invalidate(); setShowBatchNoModal(false); setSelectedBatch(null); batchNoForm.reset() },
+    onError: (e) => toast.error(e.response?.data?.message || 'Batch update failed'),
   })
   const adjustMut = useMutation({
     mutationFn: ({ id, ...d }) => api.post(`/pharmacy/inventory/${id}/adjust`, d),
@@ -705,7 +716,7 @@ export default function PharmacyPage() {
               <button key={key} className={`btn text-xs ${statusFilter === key ? 'border-cyan text-cyan' : ''}`} onClick={() => setStatusFilter(statusFilter === key ? '' : key)}><Filter size={14} /> {label}: {statusCounts[key]}</button>
             ))}
           </div>
-          {inventoryQuery.isLoading ? <CenterSpinner /> : <InventoryTable items={items} onAdjust={(item) => { setSelectedItem(item); setShowAdjustModal(true) }} />}
+          {inventoryQuery.isLoading ? <CenterSpinner /> : <InventoryTable items={items} onAdjust={(item) => { setSelectedItem(item); setShowAdjustModal(true) }} onBatchNo={(item, batch) => { setSelectedItem(item); setSelectedBatch(batch); batchNoForm.reset({ batch_no: batch.batch_no || '' }); setShowBatchNoModal(true) }} />}
         </div>
       )}
 
@@ -844,6 +855,7 @@ export default function PharmacyPage() {
         onImport={() => importMut.mutate({ rows: importRows, mode: importMode })}
       />
       <BatchModal open={showBatchModal} onClose={() => setShowBatchModal(false)} item={selectedItem} form={batchForm} mutate={batchMut} />
+      <BatchNoModal open={showBatchNoModal} onClose={() => setShowBatchNoModal(false)} item={selectedItem} batch={selectedBatch} form={batchNoForm} mutate={batchNoMut} />
       <AdjustModal open={showAdjustModal} onClose={() => setShowAdjustModal(false)} item={selectedItem} form={adjustForm} mutate={adjustMut} />
       <SupplierModal open={showSupplierModal} onClose={() => setShowSupplierModal(false)} form={supplierForm} mutate={supplierMut} />
       <ReceiptModal receipt={receipt} onClose={() => setReceipt(null)} />
@@ -1058,7 +1070,7 @@ function SimpleList({ title, rows, render }) {
   return <div className="card"><h2 className="text-sm font-semibold text-white mb-3">{title}</h2><div className="space-y-2">{rows.length ? rows.map((row, i) => <div key={row.item_id || i} className="flex items-center justify-between text-xs border-b border-default pb-2 last:border-b-0">{render(row)}</div>) : <div className="text-xs text-slate-400 py-4">No data.</div>}</div></div>
 }
 
-function InventoryTable({ items, onAdjust }) {
+function InventoryTable({ items, onAdjust, onBatchNo }) {
   return (
     <div className="overflow-x-auto">
       <table className="tbl">
@@ -1069,7 +1081,17 @@ function InventoryTable({ items, onAdjust }) {
               <td><div className="font-medium text-white text-xs">{item.generic_name}</div><div className="text-[10px] text-slate-400">{item.brand_name || '-'} | {item.form} {item.strength || ''}</div></td>
               <td className="text-xs"><div className="flex items-center gap-1"><MapPin size={13} /> {item.rack_location || 'Unmapped'}</div>{item.is_cold_chain && <div className="text-cyan flex items-center gap-1 mt-1"><Snowflake size={13} /> Cold</div>}</td>
               <td className={`text-xs font-bold ${item.is_out_of_stock || item.is_low_stock ? 'text-brand-red' : 'text-brand-green'}`}><div>{stockText(item.current_stock, item)}</div><div className="text-[10px] text-slate-500">{item.current_stock} {inferredLooseUnit(item)} total</div></td>
-              <td className="text-xs">{item.active_batches || 0}</td>
+              <td className="text-xs">
+                <div className="space-y-1">
+                  {(item.batches || []).filter(b => Number(b.quantity_rem || 0) > 0).slice(0, 3).map(batch => (
+                    <button key={batch.id} className="block w-full rounded border border-default px-2 py-1 text-left hover:border-cyan/40" onClick={() => onBatchNo(item, batch)}>
+                      <span className="font-semibold text-cyan">{batch.batch_no}</span>
+                      <span className="ml-2 text-slate-400">{batch.quantity_rem} qty</span>
+                    </button>
+                  ))}
+                  {!item.batches?.length && <span>{item.active_batches || 0}</span>}
+                </div>
+              </td>
               <td className="text-xs">{item.nearest_expiry ? fmt.date(item.nearest_expiry) : '-'}</td>
               <td className="text-xs">{money(item.stock_value)}</td>
               <td className="text-xs">{Number(item.profit_margin_pct || 0).toFixed(1)}%</td>
@@ -1147,8 +1169,9 @@ function MedicineModal({ open, onClose, form, mutate }) {
 function ImportModal({ open, onClose, rows, errors, loading, onRows, onErrors, onImport, columns = [], importMode = 'skip', onModeChange }) {
   const [pasteText, setPasteText] = useState('')
   const [defaults, setDefaults] = useState({ form: 'Other', pack_unit: 'pack', units_per_pack: 1, expiry_date: '', gst_pct: '' })
-  const detectedCols = columns.length ? Array.from(new Set([...columns, ...reviewImportFields.filter(c => rows.some(r => r[c]))])) : reviewImportFields
-  const missingRows = rows.filter(row => (!hasImportValue(row.generic_name) && !hasImportValue(row.brand_name)) || requiredImportFields.some(f => !hasImportValue(row[f])) || !hasImportQty(row))
+  const cleanColumns = columns.filter(c => c && !hiddenImportFields.has(c))
+  const detectedCols = cleanColumns.length ? Array.from(new Set([...cleanColumns, ...reviewImportFields.filter(c => rows.some(r => r[c]))])) : reviewImportFields
+  const missingRows = rows.filter(row => requiredImportFields.some(f => !hasImportValue(row[f])) || !hasImportQty(row))
   const priceRows = rows.filter(row => Number(row.selling_price || row.mrp || 0) > Number(row.mrp || 0))
   const fixDate = (val) => {
     if (!val) return val
@@ -1255,14 +1278,14 @@ function ImportModal({ open, onClose, rows, errors, loading, onRows, onErrors, o
           </div>
         </div>
         {!!errors.length && <div className="alert-red max-h-44 overflow-auto text-xs"><div>{errors.slice(0, 30).map((e, i) => <div key={i}>{e}</div>)}</div></div>}
-        {!!missingRows.length && <div className="alert-red text-xs">Fix highlighted rows: Medicine or Brand, batch, expiry, MRP, selling price, GST %, and either Qty Bought (Packs) or Qty Bought (Loose) are required.</div>}
+        {!!missingRows.length && <div className="alert-red text-xs">Fix highlighted rows: expiry, MRP, selling price, GST %, and either Qty Bought (Packs) or Qty Bought (Loose) are required. Blank medicine and batch will be auto-created.</div>}
         {!!priceRows.length && <div className="alert-red text-xs">Selling price cannot be greater than MRP. Fix rows: {priceRows.slice(0, 8).map(r => r.__row).join(', ')}</div>}
         {!!rows.length && (
           <div className="overflow-x-auto max-h-96">
           <table className="tbl">
             <thead><tr><th>Row</th>{detectedCols.map(col => <th key={col}>{importColumnLabels[col] || col.replace(/_/g, ' ')}</th>)}</tr></thead>
             <tbody>{rows.slice(0, 50).map(row => <tr key={row.__row}><td>{row.__row}</td>{detectedCols.map(col => {
-              const missingRequired = (requiredImportFields.includes(col) && !hasImportValue(row[col])) || (['generic_name', 'brand_name'].includes(col) && !hasImportValue(row.generic_name) && !hasImportValue(row.brand_name))
+              const missingRequired = requiredImportFields.includes(col) && !hasImportValue(row[col])
               const missingQty = ['pack_quantity', 'loose_quantity'].includes(col) && !hasImportQty(row)
               return <td key={col}><input className={`input min-w-28 text-xs ${(missingRequired || missingQty) ? 'border-brand-red/60' : ''}`} value={row[col] ?? ''} onChange={e => updateCell(row.__row, col, e.target.value)} /></td>
             })}</tr>)}</tbody>
@@ -1314,6 +1337,11 @@ function ImportModal({ open, onClose, rows, errors, loading, onRows, onErrors, o
 function BatchModal({ open, onClose, item, form, mutate }) {
   const { register, handleSubmit } = form
   return <Modal open={open} onClose={onClose} title={`Receive Batch - ${item?.generic_name || ''}`} size="lg"><form onSubmit={handleSubmit(d => mutate.mutate({ id: item?.id, ...d }))} className="space-y-3"><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><Field label="Batch no" required><input className="input" {...register('batch_no', { required: true })} /></Field><Field label="Mfg date"><input type="date" className="input" {...register('mfg_date')} /></Field><Field label="Expiry date" required><input type="date" className="input" {...register('expiry_date', { required: true })} /></Field></div><div className="grid grid-cols-1 md:grid-cols-5 gap-3"><Field label={`${item?.pack_unit || 'Packs'} received`}><input type="number" min="0" className="input" {...register('pack_quantity')} /></Field><Field label={`${item?.unit || 'Base units'} received`}><input type="number" min="0" className="input" {...register('loose_quantity')} /></Field><Field label="Purchase rate/pack"><input type="number" step="0.01" className="input" {...register('cost_price')} /></Field><Field label="MRP" required><input type="number" step="0.01" className="input" {...register('mrp', { required: true })} /></Field><Field label="Selling price"><input type="number" step="0.01" className="input" {...register('selling_price')} /></Field></div><div className="grid grid-cols-1 md:grid-cols-6 gap-3"><Field label="Taxable amount"><input type="number" step="0.01" className="input" {...register('taxable_rate')} /></Field><Field label="GST %" required><select className="select" {...register('gst_pct', { required: true })}><option value="">Select GST</option>{gstSlabs.map(rate => <option key={rate} value={rate}>{rate}%</option>)}</select></Field><Field label="CGST"><input type="number" step="0.01" className="input" {...register('cgst_amt')} /></Field><Field label="SGST"><input type="number" step="0.01" className="input" {...register('sgst_amt')} /></Field><Field label="IGST"><input type="number" step="0.01" className="input" {...register('igst_amt')} /></Field><Field label="Purchase total"><input type="number" step="0.01" className="input" {...register('purchase_total')} /></Field></div><div className="text-xs text-slate-400">GST % is mandatory from the supplier invoice. Enter 0 only for GST-exempt products.</div><Field label="Supplier"><input className="input" {...register('supplier')} /></Field><SubmitRow loading={mutate.isPending} label="Receive stock" onCancel={onClose} /></form></Modal>
+}
+
+function BatchNoModal({ open, onClose, item, batch, form, mutate }) {
+  const { register, handleSubmit } = form
+  return <Modal open={open} onClose={onClose} title="Add / Edit Batch Number" size="md"><form onSubmit={handleSubmit(d => mutate.mutate({ item_id: item?.id, batch_id: batch?.id, batch_no: d.batch_no }))} className="space-y-3"><div className="rounded-lg border border-default bg-navy-800 p-3 text-xs"><div className="font-semibold text-white">{item?.generic_name}</div><div className="text-slate-400">Quantity: {batch?.quantity_rem || 0} | Expiry: {batch?.expiry_date ? fmt.date(batch.expiry_date) : '-'}</div></div><Field label="Batch number" required><input className="input" autoFocus placeholder="Enter real batch no" {...register('batch_no', { required: true })} /></Field><SubmitRow loading={mutate.isPending} label="Save batch no" onCancel={onClose} /></form></Modal>
 }
 
 function AdjustModal({ open, onClose, item, form, mutate }) {
