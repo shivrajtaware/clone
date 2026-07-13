@@ -1,0 +1,63 @@
+{
+  "name": "draisolnex-frontend",
+  "version": "1.0.0",
+  "description": "MediCore HMS",
+  "author": "Estoniz",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint src --ext .js,.jsx",
+    "electron": "electron main.js",
+    "electron:build": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "@headlessui/react": "^1.7.18",
+    "@tanstack/react-query": "^5.24.0",
+    "axios": "^1.6.7",
+    "clsx": "^2.1.0",
+    "date-fns": "^3.3.1",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.8",
+    "lucide-react": "^0.344.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "react-hook-form": "^7.51.0",
+    "react-hot-toast": "^2.4.1",
+    "react-router-dom": "^6.22.0",
+    "recharts": "^2.12.0",
+    "socket.io-client": "^4.7.4",
+    "xlsx": "^0.18.5",
+    "zustand": "^4.5.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.18",
+    "electron": "^42.4.1",
+    "electron-builder": "^26.15.3",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react": "^7.34.0",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "vite": "^5.1.4"
+  },
+  "build": {
+    "appId": "com.medicore.hms",
+    "productName": "MediCore HMS",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

@@ -1,0 +1,122 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: medicore_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: medicore_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_this_password_in_production}
+      POSTGRES_DB: medicore_db
+      POSTGRES_INITDB_ARGS: "-c log_connections=on -c log_disconnections=on"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medicore_user -d medicore_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - medicore_network
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: medicore_backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://medicore_user:${DB_PASSWORD:-change_this_password_in_production}@postgres:5432/medicore_db
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    command: >
+      sh -c "npm run prisma:migrate && npm run seed && npm start"
+    networks:
+      - medicore_network
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: medicore_frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    environment:
+      VITE_API_URL: http://backend:5000/api
+      VITE_SOCKET_URL: http://backend:5000
+    networks:
+      - medicore_network
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Prisma Studio for database management (dev-only)
+  prisma-studio:
+    image: node:18-alpine
+    container_name: medicore_prisma_studio
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+    ports:
+      - "5555:5555"
+    command: npx prisma studio --port 5555 --hostname 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - medicore_network
+    profiles:
+      - dev
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "1"
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  medicore_network:
+    driver: bridge
+

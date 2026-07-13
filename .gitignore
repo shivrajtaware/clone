@@ -1,0 +1,10 @@
+node_modules/
+.env
+dist/
+build/
+*.log
+logs/
+uploads/
+.DS_Store
+*.pem
+.prisma/
