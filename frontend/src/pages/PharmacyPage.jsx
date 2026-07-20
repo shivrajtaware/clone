@@ -235,6 +235,7 @@ export default function PharmacyPage() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
+  const [showEditModal, setShowEditModal] = useState(false)
   const [showBatchModal, setShowBatchModal] = useState(false)
   const [showBatchNoModal, setShowBatchNoModal] = useState(false)
   const [showAdjustModal, setShowAdjustModal] = useState(false)
@@ -269,6 +270,7 @@ export default function PharmacyPage() {
     }, [qc])
 
   const itemForm = useForm({ defaultValues: { category: 'OTHER', form: 'Other', unit: 'unit', pack_unit: 'pack', units_per_pack: 1, min_stock_level: 10, max_stock_level: 1000, reorder_quantity: 100 } })
+  const editItemForm = useForm()
   const batchForm = useForm()
   const batchNoForm = useForm()
   const adjustForm = useForm({ defaultValues: { type: 'ADJUSTMENT' } })
@@ -316,23 +318,69 @@ export default function PharmacyPage() {
   })
 
   const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ['pharmacy-dashboard'] })
-    qc.invalidateQueries({ queryKey: ['pharmacy-inventory'] })
-    qc.invalidateQueries({ queryKey: ['pharmacy-pos'] })
-    qc.invalidateQueries({ queryKey: ['pharmacy-suppliers'] })
+    return Promise.all([
+      qc.invalidateQueries({ queryKey: ['pharmacy-dashboard'] }),
+      qc.invalidateQueries({ queryKey: ['pharmacy-inventory'] }),
+      qc.invalidateQueries({ queryKey: ['pharmacy-pos'] }),
+      qc.invalidateQueries({ queryKey: ['pharmacy-suppliers'] }),
+    ])
   }
 
   const addMut = useMutation({
-    mutationFn: (d) => api.post('/pharmacy/inventory', d),
-    onSuccess: () => { toast.success('Medicine created'); invalidate(); setShowAddModal(false); itemForm.reset() },
+    mutationFn: async ({ opening_stock, ...medicine }) => {
+      if (!String(medicine.generic_name || '').trim()) medicine.generic_name = String(medicine.brand_name || '').trim()
+      const created = await api.post('/pharmacy/inventory', medicine)
+      await api.post(`/pharmacy/inventory/${created.data.data.id}/batch`, opening_stock)
+      return created
+    },
+    onSuccess: () => { toast.success('Medicine and current stock added'); invalidate(); setShowAddModal(false); itemForm.reset() },
+    onError: (e) => toast.error(e.response?.data?.message || 'Could not add medicine stock'),
+  })
+  const editItemMut = useMutation({
+    mutationFn: async ({ id, stock_packs, stock_loose, current_stock, batches, active_batches, stock_value, nearest_expiry, profit_margin_pct, is_low_stock, is_out_of_stock, is_overstock, expiring_soon, expired_stock, ...data }) => {
+      await api.put(`/pharmacy/inventory/${id}`, data)
+      await api.put(`/pharmacy/inventory/${id}/stock`, { pack_quantity: stock_packs, loose_quantity: stock_loose })
+    },
+    onSuccess: () => { toast.success('Medicine details updated'); invalidate(); setShowEditModal(false); setSelectedItem(null) },
+    onError: (e) => toast.error(e.response?.data?.message || 'Could not update medicine'),
+  })
+  const deleteItemMut = useMutation({
+    mutationFn: (id) => api.delete(`/pharmacy/inventory/${id}`),
+    onSuccess: () => { toast.success('SKU deleted'); invalidate() },
+    onError: (e) => toast.error(e.response?.data?.message || 'SKU could not be deleted'),
   })
   const batchMut = useMutation({
     mutationFn: ({ id, ...d }) => api.post(`/pharmacy/inventory/${id}/batch`, d),
     onSuccess: () => { toast.success('Batch received'); invalidate(); setShowBatchModal(false); batchForm.reset() },
   })
   const batchNoMut = useMutation({
-    mutationFn: ({ item_id, batch_id, batch_no }) => api.patch(`/pharmacy/inventory/${item_id}/batches/${batch_id}`, { batch_no }),
-    onSuccess: () => { toast.success('Batch number saved'); invalidate(); setShowBatchNoModal(false); setSelectedBatch(null); batchNoForm.reset() },
+    mutationFn: async ({ item_id, batch_id, batch_no, pack_quantity, loose_quantity, quantity_rem, previous_quantity }) => {
+      const targetQuantity = Number(quantity_rem || 0)
+      const response = await api.patch(`/pharmacy/inventory/${item_id}/batches/${batch_id}`, {
+        batch_no,
+        pack_quantity: Number(pack_quantity || 0),
+        loose_quantity: Number(loose_quantity || 0),
+        quantity_rem: targetQuantity,
+      })
+
+      // Older backend processes only save the batch number. Reconcile the
+      // difference through their existing batch-aware adjustment endpoint.
+      const responseQuantity = response.data?.data?.quantity_rem
+      const savedQuantity = responseQuantity === undefined || responseQuantity === null
+        ? Number(previous_quantity || 0)
+        : Number(responseQuantity)
+      const delta = targetQuantity - savedQuantity
+      if (delta) {
+        await api.post(`/pharmacy/inventory/${item_id}/adjust`, {
+          type: delta > 0 ? 'RECONCILIATION_PLUS' : 'ADJUSTMENT',
+          quantity: Math.abs(delta),
+          batch_no,
+          reason: 'Batch quantity corrected from batch stock editor',
+        })
+      }
+      return response
+    },
+    onSuccess: async () => { await invalidate(); toast.success('Batch saved'); setShowBatchNoModal(false); setSelectedBatch(null); batchNoForm.reset() },
     onError: (e) => toast.error(e.response?.data?.message || 'Batch update failed'),
   })
   const adjustMut = useMutation({
@@ -483,6 +531,10 @@ export default function PharmacyPage() {
       quantity_unit: line.quantity_unit === 'PACK' ? 'PACK' : 'LOOSE',
     }
   })
+
+  const usableBatches = (item) => (item?.batches || []).filter(batch => (
+    Number(batch.quantity_rem || 0) > 0 && new Date(batch.expiry_date) >= new Date()
+  ))
 
   const openDispenseReview = (rx) => {
     setSelectedPrescription(rx)
@@ -716,7 +768,7 @@ export default function PharmacyPage() {
               <button key={key} className={`btn text-xs ${statusFilter === key ? 'border-cyan text-cyan' : ''}`} onClick={() => setStatusFilter(statusFilter === key ? '' : key)}><Filter size={14} /> {label}: {statusCounts[key]}</button>
             ))}
           </div>
-          {inventoryQuery.isLoading ? <CenterSpinner /> : <InventoryTable items={items} onAdjust={(item) => { setSelectedItem(item); setShowAdjustModal(true) }} onBatchNo={(item, batch) => { setSelectedItem(item); setSelectedBatch(batch); batchNoForm.reset({ batch_no: batch.batch_no || '' }); setShowBatchNoModal(true) }} />}
+          {inventoryQuery.isLoading ? <CenterSpinner /> : <InventoryTable items={items} onDelete={(item) => { if (window.confirm(`Delete ${item.brand_name || item.generic_name} from inventory? This cannot be undone.`)) deleteItemMut.mutate(item.id) }} onEdit={(item) => { const size = packSize(item); setSelectedItem(item); editItemForm.reset({ ...item, stock_packs: Math.floor(Number(item.current_stock || 0) / size), stock_loose: Number(item.current_stock || 0) % size }); setShowEditModal(true) }} onReceive={(item) => { setSelectedItem(item); batchForm.reset({ gst_pct: 0 }); setShowBatchModal(true) }} onAdjust={(item) => { setSelectedItem(item); setShowAdjustModal(true) }} onBatchNo={(item, batch) => { const size = packSize(item); const batchQty = Number(batch.quantity_rem || 0); setSelectedItem(item); setSelectedBatch(batch); batchNoForm.reset({ batch_no: batch.batch_no || '', pack_quantity: Math.floor(batchQty / size), loose_quantity: batchQty % size }); setShowBatchNoModal(true) }} />}
         </div>
       )}
 
@@ -841,6 +893,7 @@ export default function PharmacyPage() {
       {tab === 'audit' && <div className="card"><AuditList rows={dashboard.audit_logs || []} /></div>}
 
       <MedicineModal open={showAddModal} onClose={() => setShowAddModal(false)} form={itemForm} mutate={addMut} />
+      <EditMedicineModal open={showEditModal} onClose={() => setShowEditModal(false)} item={selectedItem} form={editItemForm} mutate={editItemMut} />
       <ImportModal
         open={showImportModal}
         onClose={() => { setShowImportModal(false); setImportRows([]); setImportErrors([]); setImportedColumns([]) }}
@@ -907,13 +960,20 @@ export default function PharmacyPage() {
                       </div>
                     </div>
                   </div>
-                  {item && (
-                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-400">
-                      <span>Pack: 1 {inferredPackUnit(item)} = {packSize(item)} {inferredLooseUnit(item)}</span>
-                      <span>Total loose issue: {baseQuantity} {inferredLooseUnit(item)}</span>
-                      <span>GST will come from the allocated batch.</span>
-                    </div>
-                  )}
+                   {item && (
+                     <div className="mt-2 space-y-1 text-[11px] text-slate-400">
+                       <span>Pack: 1 {inferredPackUnit(item)} = {packSize(item)} {inferredLooseUnit(item)}</span>
+                       <span className="ml-2">Total loose issue: {baseQuantity} {inferredLooseUnit(item)}</span>
+                       <span className="ml-2">GST will come from the allocated batch.</span>
+                       <div className="rounded border border-cyan/20 bg-navy-900 px-2 py-1 text-cyan">
+                         <strong>Batch for billing:</strong>{' '}
+                         {usableBatches(item).length
+                           ? usableBatches(item).map(batch => `${batch.batch_no} (${stockText(batch.quantity_rem, item)})`).join(' → ')
+                           : 'No usable batch available'}
+                         {usableBatches(item).length > 1 && <span className="ml-1 text-slate-400">(FEFO order; final allocated batches appear on the bill)</span>}
+                       </div>
+                     </div>
+                   )}
                 </div>
               )
             })}
@@ -1070,36 +1130,37 @@ function SimpleList({ title, rows, render }) {
   return <div className="card"><h2 className="text-sm font-semibold text-white mb-3">{title}</h2><div className="space-y-2">{rows.length ? rows.map((row, i) => <div key={row.item_id || i} className="flex items-center justify-between text-xs border-b border-default pb-2 last:border-b-0">{render(row)}</div>) : <div className="text-xs text-slate-400 py-4">No data.</div>}</div></div>
 }
 
-function InventoryTable({ items, onAdjust, onBatchNo }) {
+function InventoryTable({ items, onDelete, onEdit, onReceive, onAdjust, onBatchNo }) {
+  const inventoryItems = Array.isArray(items) ? items : []
   return (
     <div className="overflow-x-auto">
       <table className="tbl">
         <thead><tr><th>Medicine</th><th>Storage</th><th>Stock</th><th>Batches</th><th>Expiry</th><th>Valuation</th><th>Margin</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>
-          {items.map(item => (
+          {inventoryItems.map(item => (
             <tr key={item.id}>
-              <td><div className="font-medium text-white text-xs">{item.generic_name}</div><div className="text-[10px] text-slate-400">{item.brand_name || '-'} | {item.form} {item.strength || ''}</div></td>
+              <td><div className="font-medium text-white text-xs">{item.brand_name || item.generic_name}</div><div className="text-[10px] text-slate-400">{item.generic_name && item.brand_name ? `${item.generic_name} | ` : ''}{item.form} {item.strength || ''}</div></td>
               <td className="text-xs"><div className="flex items-center gap-1"><MapPin size={13} /> {item.rack_location || 'Unmapped'}</div>{item.is_cold_chain && <div className="text-cyan flex items-center gap-1 mt-1"><Snowflake size={13} /> Cold</div>}</td>
               <td className={`text-xs font-bold ${item.is_out_of_stock || item.is_low_stock ? 'text-brand-red' : 'text-brand-green'}`}><div>{stockText(item.current_stock, item)}</div><div className="text-[10px] text-slate-500">{item.current_stock} {inferredLooseUnit(item)} total</div></td>
               <td className="text-xs">
                 <div className="space-y-1">
-                  {(item.batches || []).filter(b => Number(b.quantity_rem || 0) > 0).slice(0, 3).map(batch => (
+                  {(Array.isArray(item.batches) ? item.batches : []).filter(b => Number(b.quantity_rem || 0) > 0).map(batch => (
                     <button key={batch.id} className="block w-full rounded border border-default px-2 py-1 text-left hover:border-cyan/40" onClick={() => onBatchNo(item, batch)}>
                       <span className="font-semibold text-cyan">{batch.batch_no}</span>
-                      <span className="ml-2 text-slate-400">{batch.quantity_rem} qty</span>
+                      <span className="ml-2 text-slate-400">{stockText(batch.quantity_rem, item)}</span>
                     </button>
                   ))}
-                  {!item.batches?.length && <span>{item.active_batches || 0}</span>}
+                  {!Array.isArray(item.batches) || !item.batches.length ? <span>{item.active_batches || 0}</span> : null}
                 </div>
               </td>
               <td className="text-xs">{item.nearest_expiry ? fmt.date(item.nearest_expiry) : '-'}</td>
               <td className="text-xs">{money(item.stock_value)}</td>
               <td className="text-xs">{Number(item.profit_margin_pct || 0).toFixed(1)}%</td>
               <td>{item.is_out_of_stock ? <span className="badge-red">Out</span> : item.is_low_stock ? <span className="badge-amber">Low</span> : item.expiring_soon ? <span className="badge-red">Expiry</span> : item.is_overstock ? <span className="badge-blue">Over</span> : <span className="badge-green">OK</span>}</td>
-              <td><div className="flex gap-1"><button className="btn text-xs px-2 py-1" onClick={() => onAdjust(item)}><Undo2 size={14} /> Adjust</button></div></td>
+              <td><div className="flex gap-1"><button className="btn text-xs px-2 py-1" onClick={() => onEdit(item)}>Edit</button><button className="btn-primary text-xs px-2 py-1" onClick={() => onReceive(item)}><PackagePlus size={14} /> Stock</button><button className="btn text-xs px-2 py-1" onClick={() => onAdjust(item)}><Undo2 size={14} /> Adjust</button><button className="btn text-xs px-2 py-1 text-brand-red" title="Delete SKU" onClick={() => onDelete(item)}><Trash2 size={14} /></button></div></td>
             </tr>
           ))}
-          {!items.length && <tr><td colSpan={9} className="text-center py-8 text-slate-400">No medicines found.</td></tr>}
+          {!inventoryItems.length && <tr><td colSpan={9} className="text-center py-8 text-slate-400">No medicines found.</td></tr>}
         </tbody>
       </table>
     </div>
@@ -1162,8 +1223,36 @@ function AuditList({ rows }) {
 }
 
 function MedicineModal({ open, onClose, form, mutate }) {
-  const { register, handleSubmit } = form
-  return <Modal open={open} onClose={onClose} title="Medicine Master" size="xl"><form onSubmit={handleSubmit(d => mutate.mutate(d))} className="space-y-3"><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><Field label="Medicine / item name" required><input className="input" {...register('generic_name', { required: true })} /></Field><Field label="Brand name"><input className="input" {...register('brand_name')} /></Field><Field label="Strength"><input className="input" placeholder="500mg / 100IU/ml / 0.9% 500ml" {...register('strength')} /></Field></div><div className="grid grid-cols-1 md:grid-cols-4 gap-3"><Field label="Form"><input className="input" list="drug-form-options" placeholder="Tablet / Syrup / any" {...register('form')} /><datalist id="drug-form-options">{forms.map(f => <option key={f} value={f} />)}</datalist></Field><Field label="Category"><select className="select" {...register('category')}>{categories.map(c => <option key={c}>{c}</option>)}</select></Field><Field label="Base unit" required><input className="input" placeholder="tablet / ml / vial / bottle / dose / pair" {...register('unit', { required: true })} /></Field><Field label="Pack / issue unit"><input className="input" placeholder="strip / bottle / vial / ampoule / box / case" {...register('pack_unit')} /></Field></div><div className="grid grid-cols-1 md:grid-cols-4 gap-3"><Field label="Units per pack"><input type="number" min="1" className="input" {...register('units_per_pack')} /></Field><Field label="Rack / shelf"><input className="input" placeholder="A-02 / Cold-1" {...register('rack_location')} /></Field><Field label="Min stock"><input type="number" className="input" {...register('min_stock_level')} /></Field><Field label="Max stock"><input type="number" className="input" {...register('max_stock_level')} /></Field></div><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><Field label="Reorder qty"><input type="number" className="input" {...register('reorder_quantity')} /></Field></div><div className="flex flex-wrap gap-4 text-sm"><label className="flex items-center gap-2"><input type="checkbox" {...register('is_controlled')} /> Prescription controlled</label><label className="flex items-center gap-2"><input type="checkbox" {...register('is_cold_chain')} /> Cold storage</label></div><SubmitRow loading={mutate.isPending} label="Save medicine" onCancel={onClose} /></form></Modal>
+  const { register: formRegister, handleSubmit, setValue, watch } = form
+  // Generic name is intentionally optional; Brand is the pharmacy identity.
+  const register = (name, rules) => {
+    if (name === 'generic_name') return formRegister(name)
+    if (name === 'brand_name') return formRegister(name, { ...(rules || {}), required: 'Brand name is required' })
+    return formRegister(name, rules)
+  }
+  const applyForm = (formName) => {
+    const f = normalizedForm(formName)
+    const presets = { tablet: ['tablet', 'strip', 10], capsule: ['capsule', 'strip', 10], syrup: ['ml', 'bottle', 100], suspension: ['ml', 'bottle', 60], injection: ['vial', 'vial', 1], drops: ['ml', 'bottle', 10], cream: ['g', 'tube', 30], ointment: ['g', 'tube', 30], inhaler: ['dose', 'inhaler', 1] }
+    if (presets[f]) { const [unit, pack, size] = presets[f]; setValue('unit', unit); setValue('pack_unit', pack); setValue('units_per_pack', size) }
+  }
+  const size = Number(watch('units_per_pack') || 1), packs = Number(watch('pack_quantity') || 0), loose = Number(watch('loose_quantity') || 0), cost = Number(watch('cost_price') || 0), gst = Number(watch('gst_pct') || 0)
+  const taxable = packs * cost + loose * cost / size, tax = taxable * gst / 100
+  const fillCalculation = () => { setValue('taxable_rate', taxable.toFixed(2)); setValue('cgst_amt', (tax / 2).toFixed(2)); setValue('sgst_amt', (tax / 2).toFixed(2)); setValue('igst_amt', '0'); setValue('purchase_total', (taxable + tax).toFixed(2)) }
+  const submit = ({ batch_no, mfg_date, expiry_date, pack_quantity, loose_quantity, mrp, selling_price, cost_price, gst_pct, taxable_rate, cgst_amt, sgst_amt, igst_amt, purchase_total, supplier, ...medicine }) => mutate.mutate({ ...medicine, brand_name: medicine.brand_name || medicine.generic_name, opening_stock: { batch_no, mfg_date, expiry_date, pack_quantity, loose_quantity, mrp, selling_price, cost_price, gst_pct, taxable_rate, cgst_amt, sgst_amt, igst_amt, purchase_total, supplier } })
+  return <Modal open={open} onClose={onClose} title="Add medicine & current stock" size="xl"><form onSubmit={handleSubmit(submit)} className="space-y-4"><div><h3 className="text-sm font-semibold text-white mb-2">Medicine details</h3><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><Field label="Medicine / generic name" required><input className="input" autoFocus placeholder="e.g. Paracetamol" {...register('generic_name', { required: true })} /></Field><Field label="Brand name"><input className="input" placeholder="e.g. Crocin" {...register('brand_name')} /></Field><Field label="Strength"><input className="input" placeholder="500 mg / 100 ml" {...register('strength')} /></Field><Field label="Medicine type" required><select className="select" {...register('form')} onChange={e => { register('form').onChange(e); applyForm(e.target.value) }}>{forms.map(f => <option key={f} value={f}>{f}</option>)}</select></Field><Field label="Category"><select className="select" {...register('category')}>{categories.map(c => <option key={c}>{c}</option>)}</select></Field><Field label="Base / loose unit"><select className="select" {...register('unit')}><option value="tablet">Tablet</option><option value="capsule">Capsule</option><option value="ml">ml</option><option value="g">Gram</option><option value="vial">Vial</option><option value="dose">Dose</option><option value="piece">Piece</option></select></Field><Field label="Pack type"><select className="select" {...register('pack_unit')}><option value="strip">Strip</option><option value="bottle">Bottle</option><option value="box">Box</option><option value="tube">Tube</option><option value="vial">Vial</option><option value="ampoule">Ampoule</option><option value="inhaler">Inhaler</option></select></Field><Field label="Units in one pack"><input type="number" min="1" className="input" {...register('units_per_pack')} /></Field><Field label="Rack / shelf"><input className="input" placeholder="A-02 / Cold-1" {...register('rack_location')} /></Field></div></div><div className="rounded-lg border border-cyan/30 bg-navy-800 p-3"><h3 className="text-sm font-semibold text-white mb-2">Current stock — first batch</h3><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><Field label="Batch / lot number" required><input className="input" placeholder="As printed on supplier invoice" {...register('batch_no', { required: true })} /></Field><Field label="Expiry date" required><input type="date" className="input" {...register('expiry_date', { required: true })} /></Field><Field label="Mfg date"><input type="date" className="input" {...register('mfg_date')} /></Field><Field label="Quantity to add (packs)"><input type="number" min="0" className="input" {...register('pack_quantity')} /></Field><Field label="Quantity to add (loose)"><input type="number" min="0" className="input" {...register('loose_quantity')} /></Field><Field label="Supplier"><input className="input" {...register('supplier')} /></Field><Field label="Purchase rate / pack"><input type="number" min="0" step="0.01" className="input" {...register('cost_price')} /></Field><Field label="MRP / pack" required><input type="number" min="0" step="0.01" className="input" {...register('mrp', { required: true })} /></Field><Field label="Selling price / pack"><input type="number" min="0" step="0.01" className="input" {...register('selling_price')} /></Field><Field label="GST %" required><select className="select" {...register('gst_pct', { required: true })}>{gstSlabs.map(v => <option key={v} value={v}>{v}%</option>)}</select></Field><Field label="Taxable amount"><input type="number" step="0.01" className="input" {...register('taxable_rate')} /></Field><div className="flex items-end"><button type="button" className="btn w-full" onClick={fillCalculation}><Zap size={15} /> Calculate</button></div><Field label="CGST"><input type="number" step="0.01" className="input" {...register('cgst_amt')} /></Field><Field label="SGST"><input type="number" step="0.01" className="input" {...register('sgst_amt')} /></Field><Field label="IGST"><input type="number" step="0.01" className="input" {...register('igst_amt')} /></Field><Field label="Invoice total"><input type="number" step="0.01" className="input" {...register('purchase_total')} /></Field></div><div className="mt-3 grid grid-cols-3 gap-2 text-xs"><div><span className="text-slate-400">Total stock</span><div className="font-semibold text-white">{packs * size + loose} {watch('unit')}</div></div><div><span className="text-slate-400">GST amount</span><div className="font-semibold text-white">{money(tax)}</div></div><div><span className="text-slate-400">Est. invoice</span><div className="font-semibold text-cyan">{money(taxable + tax)}</div></div></div></div><div className="grid grid-cols-2 gap-3"><Field label="Low-stock alert"><input type="number" min="0" className="input" {...register('min_stock_level')} /></Field><Field label="Maximum stock"><input type="number" min="0" className="input" {...register('max_stock_level')} /></Field></div><SubmitRow loading={mutate.isPending} label="Save medicine & add stock" onCancel={onClose} /></form></Modal>
+}
+
+function EditMedicineModal({ open, onClose, item, form, mutate }) {
+  const { register, handleSubmit, watch, setValue } = form
+  const packs = Number(watch('stock_packs') || 0)
+  const loose = Number(watch('stock_loose') || 0)
+  const unitsPerPack = Math.max(1, Number(watch('units_per_pack') || 1))
+  const unit = watch('unit') || item?.unit || 'units'
+  const packUnit = watch('pack_unit') || item?.pack_unit || 'packs'
+  const totalStock = packs * unitsPerPack + loose
+  const presets = { tablet: ['tablet', 'strip'], capsule: ['capsule', 'strip'], syrup: ['ml', 'bottle'], suspension: ['ml', 'bottle'], injection: ['vial', 'vial'], drops: ['ml', 'bottle'], cream: ['g', 'tube'], ointment: ['g', 'tube'], inhaler: ['dose', 'inhaler'] }
+  const applyForm = (value) => { const preset = presets[normalizedForm(value)]; if (preset) { setValue('unit', preset[0]); setValue('pack_unit', preset[1]) } }
+  return <Modal open={open} onClose={onClose} title={`Edit medicine — ${item?.generic_name || ''}`} size="lg"><form onSubmit={handleSubmit(data => mutate.mutate({ id: item?.id, ...data }))} className="space-y-3"><div className="rounded-lg border border-cyan/30 bg-navy-800 p-3"><div className="text-sm font-semibold text-white mb-2">Current stock quantity</div><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><Field label={`${packUnit} in stock`}><input type="number" min="0" className="input" {...register('stock_packs')} /></Field><Field label={`${unit} loose`}><input type="number" min="0" className="input" {...register('stock_loose')} /></Field><div className="rounded-lg border border-default px-3 py-2"><div className="label">Total stock (automatic)</div><div className="text-lg font-bold text-cyan">{totalStock} {unit}</div><div className="text-[11px] text-slate-400">{packs} {packUnit} × {unitsPerPack} {unit} + {loose} loose</div></div></div><p className="mt-2 text-xs text-slate-400">For syrup, enter bottles and units per pack (for example 100 ml); total ml updates automatically.</p></div><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><Field label="Medicine name" required><input className="input" {...register('generic_name', { required: true })} /></Field><Field label="Brand"><input className="input" {...register('brand_name')} /></Field><Field label="Strength"><input className="input" {...register('strength')} /></Field><Field label="Medicine type"><select className="select" {...register('form')} onChange={e => { register('form').onChange(e); applyForm(e.target.value) }}>{forms.map(f => <option key={f}>{f}</option>)}</select></Field><Field label="Category"><select className="select" {...register('category')}>{categories.map(c => <option key={c}>{c}</option>)}</select></Field><Field label="Rack / shelf"><input className="input" {...register('rack_location')} /></Field><Field label="Base unit"><select className="select" {...register('unit')}><option value="tablet">Tablet</option><option value="capsule">Capsule</option><option value="ml">ml</option><option value="g">Gram</option><option value="vial">Vial</option><option value="dose">Dose</option><option value="piece">Piece</option></select></Field><Field label="Pack type"><select className="select" {...register('pack_unit')}><option value="strip">Strip</option><option value="bottle">Bottle</option><option value="box">Box</option><option value="tube">Tube</option><option value="vial">Vial</option><option value="ampoule">Ampoule</option><option value="inhaler">Inhaler</option></select></Field><Field label="Units per pack"><input type="number" min="1" className="input" {...register('units_per_pack')} /></Field><Field label="Low-stock alert"><input type="number" min="0" className="input" {...register('min_stock_level')} /></Field><Field label="Maximum stock"><input type="number" min="0" className="input" {...register('max_stock_level')} /></Field></div><div className="flex gap-4 text-sm"><label className="flex items-center gap-2"><input type="checkbox" {...register('is_controlled')} /> Prescription controlled</label><label className="flex items-center gap-2"><input type="checkbox" {...register('is_cold_chain')} /> Cold storage</label></div><SubmitRow loading={mutate.isPending} label="Save medicine & stock" onCancel={onClose} /></form></Modal>
 }
 
 function ImportModal({ open, onClose, rows, errors, loading, onRows, onErrors, onImport, columns = [], importMode = 'skip', onModeChange }) {
@@ -1335,13 +1424,20 @@ function ImportModal({ open, onClose, rows, errors, loading, onRows, onErrors, o
 }
 
 function BatchModal({ open, onClose, item, form, mutate }) {
-  const { register, handleSubmit } = form
-  return <Modal open={open} onClose={onClose} title={`Receive Batch - ${item?.generic_name || ''}`} size="lg"><form onSubmit={handleSubmit(d => mutate.mutate({ id: item?.id, ...d }))} className="space-y-3"><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><Field label="Batch no" required><input className="input" {...register('batch_no', { required: true })} /></Field><Field label="Mfg date"><input type="date" className="input" {...register('mfg_date')} /></Field><Field label="Expiry date" required><input type="date" className="input" {...register('expiry_date', { required: true })} /></Field></div><div className="grid grid-cols-1 md:grid-cols-5 gap-3"><Field label={`${item?.pack_unit || 'Packs'} received`}><input type="number" min="0" className="input" {...register('pack_quantity')} /></Field><Field label={`${item?.unit || 'Base units'} received`}><input type="number" min="0" className="input" {...register('loose_quantity')} /></Field><Field label="Purchase rate/pack"><input type="number" step="0.01" className="input" {...register('cost_price')} /></Field><Field label="MRP" required><input type="number" step="0.01" className="input" {...register('mrp', { required: true })} /></Field><Field label="Selling price"><input type="number" step="0.01" className="input" {...register('selling_price')} /></Field></div><div className="grid grid-cols-1 md:grid-cols-6 gap-3"><Field label="Taxable amount"><input type="number" step="0.01" className="input" {...register('taxable_rate')} /></Field><Field label="GST %" required><select className="select" {...register('gst_pct', { required: true })}><option value="">Select GST</option>{gstSlabs.map(rate => <option key={rate} value={rate}>{rate}%</option>)}</select></Field><Field label="CGST"><input type="number" step="0.01" className="input" {...register('cgst_amt')} /></Field><Field label="SGST"><input type="number" step="0.01" className="input" {...register('sgst_amt')} /></Field><Field label="IGST"><input type="number" step="0.01" className="input" {...register('igst_amt')} /></Field><Field label="Purchase total"><input type="number" step="0.01" className="input" {...register('purchase_total')} /></Field></div><div className="text-xs text-slate-400">GST % is mandatory from the supplier invoice. Enter 0 only for GST-exempt products.</div><Field label="Supplier"><input className="input" {...register('supplier')} /></Field><SubmitRow loading={mutate.isPending} label="Receive stock" onCancel={onClose} /></form></Modal>
+  const { register, handleSubmit, watch, setValue } = form
+  const packs = Number(watch('pack_quantity') || 0), loose = Number(watch('loose_quantity') || 0), size = Number(item?.units_per_pack || 1), rate = Number(watch('cost_price') || 0), gst = Number(watch('gst_pct') || 0)
+  const taxable = packs * rate + (loose * rate / size), tax = taxable * gst / 100, total = taxable + tax, sell = Number(watch('selling_price') || watch('mrp') || 0)
+  const setAutoTax = () => { setValue('taxable_rate', taxable.toFixed(2)); setValue('cgst_amt', (tax / 2).toFixed(2)); setValue('sgst_amt', (tax / 2).toFixed(2)); setValue('igst_amt', '0'); setValue('purchase_total', total.toFixed(2)) }
+  return <Modal open={open} onClose={onClose} title={`Add stock batch — ${item?.generic_name || ''}`} size="lg"><form onSubmit={handleSubmit(d => mutate.mutate({ id: item?.id, ...d }))} className="space-y-3"><div className="rounded-lg border border-cyan/30 bg-navy-800 p-3 text-xs"><div className="font-semibold text-white">{item?.form} • {item?.pack_unit} of {size} {item?.unit}</div><div className="text-slate-400">Every delivery is stored as a separate batch. Sell stock follows the earliest-expiry batch first.</div></div><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><Field label="Supplier batch no" required><input className="input" autoFocus placeholder="Batch / lot on invoice" {...register('batch_no', { required: true })} /></Field><Field label="Expiry date" required><input type="date" className="input" {...register('expiry_date', { required: true })} /></Field><Field label="Mfg date"><input type="date" className="input" {...register('mfg_date')} /></Field><Field label={`${item?.pack_unit || 'Packs'} received`}><input type="number" min="0" className="input" {...register('pack_quantity')} /></Field><Field label={`${item?.unit || 'Loose units'} received`}><input type="number" min="0" className="input" {...register('loose_quantity')} /></Field><Field label="Supplier"><input className="input" placeholder="Supplier name" {...register('supplier')} /></Field></div><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><Field label={`Purchase rate / ${item?.pack_unit || 'pack'}`}><input type="number" min="0" step="0.01" className="input" {...register('cost_price')} /></Field><Field label="MRP / pack" required><input type="number" min="0" step="0.01" className="input" {...register('mrp', { required: true })} /></Field><Field label="Selling price / pack"><input type="number" min="0" step="0.01" className="input" {...register('selling_price')} /></Field><Field label="GST %" required><select className="select" {...register('gst_pct', { required: true })}><option value="">Select GST</option>{gstSlabs.map(rate => <option key={rate} value={rate}>{rate}%</option>)}</select></Field><Field label="Taxable amount"><input type="number" min="0" step="0.01" className="input" {...register('taxable_rate')} /></Field><div className="flex items-end"><button type="button" className="btn w-full" onClick={setAutoTax}><Zap size={15} /> Calculate invoice</button></div></div><div className="grid grid-cols-1 md:grid-cols-4 gap-3"><Field label="CGST"><input type="number" step="0.01" className="input" {...register('cgst_amt')} /></Field><Field label="SGST"><input type="number" step="0.01" className="input" {...register('sgst_amt')} /></Field><Field label="IGST"><input type="number" step="0.01" className="input" {...register('igst_amt')} /></Field><Field label="Purchase total"><input type="number" step="0.01" className="input" {...register('purchase_total')} /></Field></div><div className="grid grid-cols-2 md:grid-cols-4 gap-2 rounded-lg bg-navy-800 p-3 text-xs"><div><span className="text-slate-400">Received</span><div className="font-semibold text-white">{packs * size + loose} {item?.unit}</div></div><div><span className="text-slate-400">Taxable</span><div className="font-semibold text-white">{money(taxable)}</div></div><div><span className="text-slate-400">GST</span><div className="font-semibold text-white">{money(tax)}</div></div><div><span className="text-slate-400">Est. margin / pack</span><div className="font-semibold text-brand-green">{money(Math.max(0, sell - rate))}</div></div></div><SubmitRow loading={mutate.isPending} label="Add this batch to stock" onCancel={onClose} /></form></Modal>
 }
 
 function BatchNoModal({ open, onClose, item, batch, form, mutate }) {
-  const { register, handleSubmit } = form
-  return <Modal open={open} onClose={onClose} title="Add / Edit Batch Number" size="md"><form onSubmit={handleSubmit(d => mutate.mutate({ item_id: item?.id, batch_id: batch?.id, batch_no: d.batch_no }))} className="space-y-3"><div className="rounded-lg border border-default bg-navy-800 p-3 text-xs"><div className="font-semibold text-white">{item?.generic_name}</div><div className="text-slate-400">Quantity: {batch?.quantity_rem || 0} | Expiry: {batch?.expiry_date ? fmt.date(batch.expiry_date) : '-'}</div></div><Field label="Batch number" required><input className="input" autoFocus placeholder="Enter real batch no" {...register('batch_no', { required: true })} /></Field><SubmitRow loading={mutate.isPending} label="Save batch no" onCancel={onClose} /></form></Modal>
+  const { register, handleSubmit, watch } = form
+  const size = packSize(item)
+  const packs = Number(watch('pack_quantity') || 0)
+  const loose = Number(watch('loose_quantity') || 0)
+  const total = packs * size + loose
+  return <Modal open={open} onClose={onClose} title="Edit batch stock" size="md"><form onSubmit={handleSubmit(d => mutate.mutate({ item_id: item?.id, batch_id: batch?.id, batch_no: d.batch_no, pack_quantity: d.pack_quantity, loose_quantity: d.loose_quantity, quantity_rem: total, previous_quantity: batch?.quantity_rem }))} className="space-y-3"><div className="rounded-lg border border-default bg-navy-800 p-3 text-xs"><div className="font-semibold text-white">{item?.generic_name}</div><div className="text-slate-400">Current: {stockText(batch?.quantity_rem || 0, item)} | Expiry: {batch?.expiry_date ? fmt.date(batch.expiry_date) : '-'}</div></div><Field label="Batch number" required><input className="input" autoFocus placeholder="Enter real batch no" {...register('batch_no', { required: true })} /></Field><div className="grid grid-cols-1 md:grid-cols-2 gap-3"><Field label={`${item?.pack_unit || 'Packs'} in this batch`}><input type="number" min="0" className="input" {...register('pack_quantity')} /></Field><Field label={`${item?.unit || 'Loose units'} in this batch`}><input type="number" min="0" className="input" {...register('loose_quantity')} /></Field></div><div className="rounded-lg border border-default bg-navy-800 px-3 py-2 text-xs"><div className="text-slate-400">New batch quantity</div><div className="text-base font-semibold text-cyan">{stockText(total, item)}</div><div className="text-[11px] text-slate-500">{total} {inferredLooseUnit(item)} total</div></div><SubmitRow loading={mutate.isPending} label="Save batch stock" onCancel={onClose} /></form></Modal>
 }
 
 function AdjustModal({ open, onClose, item, form, mutate }) {

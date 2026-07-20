@@ -560,7 +560,6 @@ router.get('/medicine-suggestions', async (req, res) => {
       batches: {
         where: { quantity_rem: { gt: 0 }, expiry_date: { gte: new Date() } },
         orderBy: [{ expiry_date: 'asc' }, { created_at: 'asc' }],
-        take: 3,
       },
     },
     orderBy: [{ generic_name: 'asc' }, { brand_name: 'asc' }],
@@ -742,6 +741,46 @@ router.put('/inventory/:id', async (req, res) => {
   res.json({ success: true, data: item });
 });
 
+router.delete('/inventory/:id', async (req, res) => {
+  await prisma.$transaction(async (tx) => {
+    const item = await tx.pharmacyItem.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId } });
+    if (!item) throw new HttpError(404, 'SKU not found');
+    await tx.drugBatch.deleteMany({ where: { item_id: item.id } });
+    await tx.pharmacyItem.delete({ where: { id: item.id } });
+    await audit(tx, req, 'INVENTORY_SKU_DELETED', item.id, { generic_name: item.generic_name, brand_name: item.brand_name });
+  });
+  res.json({ success: true, message: 'SKU deleted' });
+});
+
+// Reconcile a physical stock count entered from Inventory > Edit. Batch balances
+// are updated too, so FEFO dispensing stays consistent with the displayed total.
+router.put('/inventory/:id/stock', async (req, res) => {
+  const item = await prisma.$transaction(async (tx) => {
+    const before = await tx.pharmacyItem.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId }, include: { batches: { orderBy: { expiry_date: 'asc' } } } });
+    if (!before) throw new HttpError(404, 'Medicine not found');
+    const target = (Math.max(0, toInt(req.body.pack_quantity || 0, 'pack_quantity')) * packSize(before)) + Math.max(0, toInt(req.body.loose_quantity || 0, 'loose_quantity'));
+    const delta = target - before.current_stock;
+    if (delta > 0) {
+      const batch = before.batches.find(b => b.quantity_rem > 0) || before.batches[0];
+      if (!batch) throw new HttpError(400, 'Add the first stock batch before setting a stock quantity');
+      await tx.drugBatch.update({ where: { id: batch.id }, data: { quantity_rem: { increment: delta } } });
+    } else if (delta < 0) {
+      let remaining = Math.abs(delta);
+      for (const batch of before.batches) {
+        if (!remaining) break;
+        const take = Math.min(remaining, batch.quantity_rem);
+        if (take) await tx.drugBatch.update({ where: { id: batch.id }, data: { quantity_rem: { decrement: take } } });
+        remaining -= take;
+      }
+      if (remaining) throw new HttpError(409, 'Batch quantities do not match the recorded stock; use batch adjustment first');
+    }
+    const updated = await tx.pharmacyItem.update({ where: { id: before.id }, data: { current_stock: target } });
+    await audit(tx, req, 'STOCK_RECONCILED', before.id, { current_stock: target, delta }, { current_stock: before.current_stock });
+    return updated;
+  });
+  res.json({ success: true, data: item });
+});
+
 router.post('/inventory/:id/batch', async (req, res) => {
   const { batch_no, mfg_date, expiry_date, quantity_in, pack_quantity, loose_quantity, mrp, selling_price, cost_price, taxable_rate, gst_pct, cgst_amt, sgst_amt, igst_amt, purchase_total, supplier } = req.body;
   const batch = await prisma.$transaction(async (tx) => {
@@ -791,7 +830,7 @@ router.post('/inventory/:id/batch', async (req, res) => {
 });
 
 router.patch('/inventory/:id/batches/:batchId', async (req, res) => {
-  const { batch_no } = req.body;
+  const { batch_no, pack_quantity, loose_quantity, quantity_rem } = req.body;
   const cleanBatchNo = norm(batch_no);
   if (!cleanBatchNo) throw new HttpError(400, 'Batch number is required');
   const batch = await prisma.$transaction(async (tx) => {
@@ -803,8 +842,17 @@ router.patch('/inventory/:id/batches/:batchId', async (req, res) => {
     if (existing) throw new HttpError(409, 'This batch number already exists for this medicine');
     const before = await tx.drugBatch.findFirst({ where: { id: req.params.batchId, item_id: req.params.id } });
     if (!before) throw new HttpError(404, 'Batch not found');
-    const updated = await tx.drugBatch.update({ where: { id: req.params.batchId }, data: { batch_no: cleanBatchNo } });
-    await audit(tx, req, 'BATCH_NUMBER_UPDATED', updated.id, { batch_no: updated.batch_no }, { batch_no: before.batch_no });
+    const hasQuantity = quantity_rem !== undefined || pack_quantity !== undefined || loose_quantity !== undefined;
+    const nextQuantity = hasQuantity
+      ? quantity_rem !== undefined
+        ? Math.max(0, toInt(quantity_rem, 'quantity_rem'))
+        : (Math.max(0, toInt(pack_quantity || 0, 'pack_quantity')) * packSize(item)) + Math.max(0, toInt(loose_quantity || 0, 'loose_quantity'))
+      : before.quantity_rem;
+    const delta = nextQuantity - before.quantity_rem;
+    if (delta < 0 && item.current_stock < Math.abs(delta)) throw new HttpError(409, 'Batch adjustment exceeds available stock');
+    const updated = await tx.drugBatch.update({ where: { id: req.params.batchId }, data: { batch_no: cleanBatchNo, ...(hasQuantity && { quantity_rem: nextQuantity }) } });
+    if (delta) await tx.pharmacyItem.update({ where: { id: item.id }, data: { current_stock: { [delta > 0 ? 'increment' : 'decrement']: Math.abs(delta) } } });
+    await audit(tx, req, hasQuantity ? 'BATCH_STOCK_UPDATED' : 'BATCH_NUMBER_UPDATED', updated.id, { batch_no: updated.batch_no, quantity_rem: updated.quantity_rem, stock_display: stockLabel(updated.quantity_rem, item), delta }, { batch_no: before.batch_no, quantity_rem: before.quantity_rem });
     return updated;
   });
   res.json({ success: true, data: batch });

@@ -6,6 +6,7 @@ export const normalizedDrugForm = (v) => normalizeDrugText(v).split(' ')[0]
 export const isStripLikeUnit = (v) => ['strip', 'strips', 'packet', 'pack', 'box'].includes(normalizeDrugText(v))
 
 export const inferredLooseUnit = (item = {}) => {
+  item = item || {}
   const rawUnit = String(item.unit || '').trim()
   const rawPack = String(item.pack_unit || '').trim()
   const form = normalizedDrugForm(item.form)
@@ -25,6 +26,7 @@ export const inferredLooseUnit = (item = {}) => {
 }
 
 export const inferredPackUnit = (item = {}) => {
+  item = item || {}
   const pack = String(item.pack_unit || '').trim()
   if (pack) return pack
   return ['tablet', 'capsule'].includes(normalizedDrugForm(item.form)) ? 'strip' : 'container'

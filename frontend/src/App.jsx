@@ -221,7 +221,7 @@ export default function App() {
         <Route path="ot"                element={<ModuleRoute module="OT"><OTPage /></ModuleRoute>} />
         <Route path="emergency"         element={<ModuleRoute module="EMERGENCY"><GuardedModule name="Emergency"><EmergencyPage /></GuardedModule></ModuleRoute>} />
         <Route path="radiology"         element={<ModuleRoute module="RADIOLOGY"><GuardedModule name="Radiology"><RadiologyPage /></GuardedModule></ModuleRoute>} />
-        <Route path="pharmacy"          element={<ModuleRoute module="PHARMACY"><PharmacyPage /></ModuleRoute>} />
+        <Route path="pharmacy"          element={<ModuleRoute module="PHARMACY"><GuardedModule name="Pharmacy"><PharmacyPage /></GuardedModule></ModuleRoute>} />
         <Route path="medicine-stacks"   element={<ModuleRoute module="MEDICINE_STACKS"><MedicineStacksPage /></ModuleRoute>} />
         <Route path="billing"           element={<ModuleRoute module="BILLING"><BillingPage /></ModuleRoute>} />
         <Route path="billing-config"    element={<ModuleRoute module="BILLING_CONFIG"><BillingConfigPage /></ModuleRoute>} />
