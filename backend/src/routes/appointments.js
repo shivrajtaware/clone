@@ -206,10 +206,6 @@ router.post('/:id/complete-opd', async (req, res) => {
   } else {
     prescriptionItems = normalizeMedicineItems(req.body.medicines);
   }
-  if (prescriptionItems.some(item => item.collect_bill_here && !item.pharmacy_item_id)) {
-    badRequest('Select every Collect bill here item from pharmacy inventory');
-  }
-
   const labTests = [];
   const noteText = optionalText(req.body.notes);
   const labNotes = optionalText(req.body.lab_notes) || noteText;
@@ -221,8 +217,14 @@ router.post('/:id/complete-opd', async (req, res) => {
     let bill = null;
     let payment = null;
 
-    const roomItems = prescriptionItems.filter(item => item.collect_bill_here);
-    const pharmacyItems = prescriptionItems.filter(item => !item.collect_bill_here);
+    // Only inventory-linked medicines can be issued immediately in the OPD room.
+    // Unregistered medicines remain on the prescription queue for the pharmacist
+    // to price, tax, and bill later without blocking OPD completion.
+    const roomItems = prescriptionItems.filter(item => item.collect_bill_here && item.pharmacy_item_id);
+    // Linked medicines marked for room/OPD billing stay in roomItems. An
+    // unregistered medicine has no pharmacy_item_id, so it must still reach
+    // pharmacy for price/GST entry even when the doctor selected bill-here.
+    const pharmacyItems = prescriptionItems.filter(item => !item.collect_bill_here || !item.pharmacy_item_id);
     if (prescriptionItems.length) {
       prescription = await tx.prescription.create({
         data: {
@@ -244,7 +246,7 @@ router.post('/:id/complete-opd', async (req, res) => {
     for (const item of roomItems) {
       const stockItem = await tx.pharmacyItem.findFirst({ where: { id: item.pharmacy_item_id, hospital_id: req.hospitalId } });
       if (!stockItem) badRequest(`Inventory item not found: ${item.drug_name}`);
-      const packSize = Math.max(1, Number(stockItem.units_per_pack || 1));
+      const packSize = Math.max(0.000001, Number(stockItem.units_per_pack || 1));
       const requested = Math.max(1, Number(item.quantity || 1)) * (item.quantity_unit === 'PACK' ? packSize : 1);
       if (stockItem.current_stock < requested) badRequest(`Insufficient stock for ${stockItem.generic_name}`);
       const batches = await tx.drugBatch.findMany({

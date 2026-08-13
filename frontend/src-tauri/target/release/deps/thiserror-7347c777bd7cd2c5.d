@@ -1,0 +1,14 @@
+C:\clone-main\Aisolnex\frontend\src-tauri\target\release\deps\thiserror-7347c777bd7cd2c5.d: C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\lib.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\aserror.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\display.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\var.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\private.rs C:\clone-main\Aisolnex\frontend\src-tauri\target\release\build\thiserror-e08e9363d7ede3cc\out/private.rs
+
+C:\clone-main\Aisolnex\frontend\src-tauri\target\release\deps\libthiserror-7347c777bd7cd2c5.rlib: C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\lib.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\aserror.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\display.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\var.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\private.rs C:\clone-main\Aisolnex\frontend\src-tauri\target\release\build\thiserror-e08e9363d7ede3cc\out/private.rs
+
+C:\clone-main\Aisolnex\frontend\src-tauri\target\release\deps\libthiserror-7347c777bd7cd2c5.rmeta: C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\lib.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\aserror.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\display.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\var.rs C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\private.rs C:\clone-main\Aisolnex\frontend\src-tauri\target\release\build\thiserror-e08e9363d7ede3cc\out/private.rs
+
+C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\lib.rs:
+C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\aserror.rs:
+C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\display.rs:
+C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\var.rs:
+C:\Users\shree\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.19\src\private.rs:
+C:\clone-main\Aisolnex\frontend\src-tauri\target\release\build\thiserror-e08e9363d7ede3cc\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\clone-main\\Aisolnex\\frontend\\src-tauri\\target\\release\\build\\thiserror-e08e9363d7ede3cc\\out

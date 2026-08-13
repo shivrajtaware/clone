@@ -19,6 +19,9 @@ const initSocket = (server) => {
         if (
           allowedOrigins.length === 0 ||
           allowedOrigins.includes(normalizedOrigin) ||
+          normalizedOrigin === 'http://tauri.localhost' ||
+          normalizedOrigin === 'https://tauri.localhost' ||
+          normalizedOrigin === 'tauri://localhost' ||
           normalizedOrigin.startsWith('http://localhost:') ||
           normalizedOrigin.startsWith('http://127.0.0.1:') ||
           normalizedOrigin.endsWith('.trycloudflare.com')

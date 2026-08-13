@@ -18,6 +18,8 @@ import useAuthStore from '../context/authStore'
 import { DRUG_FORMS, baseQty, inferredLooseUnit, inferredPackUnit, packSize, stockText, normalizeDrugText, normalizedDrugForm } from '../utils/drugForms'
 import { useEffect } from 'react'
 import { io } from 'socket.io-client'
+import { getSocketUrl } from '../utils/runtimeConfig'
+import { printHtml } from '../utils/print'
 
 
 const categories = ['ANALGESIC', 'ANTIBIOTIC', 'ANTIHYPERTENSIVE', 'ANTIDIABETIC', 'DIURETIC', 'CARDIAC', 'NEUROLOGICAL', 'RESPIRATORY', 'ANTICOAGULANT', 'STEROID', 'ANTIEMETIC', 'ANTACID', 'VITAMIN', 'VACCINE', 'SURGICAL', 'CONSUMABLE', 'OTHER']
@@ -231,6 +233,12 @@ const parseExcel = async (file) => {
 }
 
 export default function PharmacyPage() {
+  useEffect(() => {
+    document.querySelectorAll('input[name="units_per_pack"]').forEach(input => {
+      input.step = 'any'
+      input.min = '0.000001'
+    })
+  })
   const [tab, setTab] = useState('dashboard')
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
@@ -258,7 +266,7 @@ export default function PharmacyPage() {
   const user = useAuthStore(s => s.user)
 
   useEffect(() => {
-    const socket = io({ auth: { token: localStorage.getItem('token') } })
+      const socket = io(getSocketUrl(), { auth: { token: localStorage.getItem('token') } })
     socket.emit('join:pharmacy')
     socket.on('pharmacy:updated', () => {
         qc.invalidateQueries({ queryKey: ['pharmacy-dashboard'] })
@@ -333,7 +341,26 @@ export default function PharmacyPage() {
       await api.post(`/pharmacy/inventory/${created.data.data.id}/batch`, opening_stock)
       return created
     },
-    onSuccess: () => { toast.success('Medicine and current stock added'); invalidate(); setShowAddModal(false); itemForm.reset() },
+    onSuccess: async () => {
+      // Clear a previous inventory search/status before refetching; otherwise
+      // a successfully-created SKU can be hidden by the old view.
+      setSearch('')
+      setStatusFilter('')
+      await invalidate()
+      // Populate the exact default view immediately after the server confirms
+      // both the medicine and its opening batch. This avoids a render timing
+      // gap while the cleared search/filter query is being mounted.
+      try {
+        const latestInventory = await api.get('/pharmacy/inventory').then(r => r.data.data)
+        qc.setQueryData(['pharmacy-inventory', '', ''], latestInventory)
+      } catch {
+        // The mutation already succeeded; the normal invalidation above will
+        // retry the list without turning a saved medicine into a false error.
+      }
+      toast.success('Medicine and current stock added')
+      setShowAddModal(false)
+      itemForm.reset()
+    },
     onError: (e) => toast.error(e.response?.data?.message || 'Could not add medicine stock'),
   })
   const editItemMut = useMutation({
@@ -354,14 +381,16 @@ export default function PharmacyPage() {
     onSuccess: () => { toast.success('Batch received'); invalidate(); setShowBatchModal(false); batchForm.reset() },
   })
   const batchNoMut = useMutation({
-    mutationFn: async ({ item_id, batch_id, batch_no, pack_quantity, loose_quantity, quantity_rem, previous_quantity }) => {
+    mutationFn: async ({ item_id, batch_id, batch_no, original_batch_no, pack_quantity, loose_quantity, quantity_rem, previous_quantity }) => {
       const targetQuantity = Number(quantity_rem || 0)
-      const response = await api.patch(`/pharmacy/inventory/${item_id}/batches/${batch_id}`, {
-        batch_no,
+      const changedBatchNumber = String(batch_no || '').trim().toUpperCase() !== String(original_batch_no || '').trim().toUpperCase()
+      const payload = {
         pack_quantity: Number(pack_quantity || 0),
         loose_quantity: Number(loose_quantity || 0),
         quantity_rem: targetQuantity,
-      })
+      }
+      if (changedBatchNumber) payload.batch_no = batch_no
+      const response = await api.patch(`/pharmacy/inventory/${item_id}/batches/${batch_id}`, payload)
 
       // Older backend processes only save the batch number. Reconcile the
       // difference through their existing batch-aware adjustment endpoint.
@@ -430,6 +459,17 @@ export default function PharmacyPage() {
     },
     onError: (e) => toast.error(e.response?.data?.message || 'Dispense failed'),
   })
+  const outsidePrescriptionMut = useMutation({
+    mutationFn: (prescriptionId) => api.post(`/pharmacy/prescriptions/${prescriptionId}/purchased-outside`),
+    onSuccess: () => {
+      toast.success('Prescription printed and marked as purchased outside')
+      setSelectedPrescription(null)
+      setDispenseRows([])
+      invalidate()
+      qc.invalidateQueries({ queryKey: ['pharmacy-prescriptions'] })
+    },
+    onError: (e) => toast.error(e.response?.data?.message || 'Could not close prescription'),
+  })
   const walkInSaleMut = useMutation({
     mutationFn: (payload) => api.post('/pharmacy/dispense', payload),
     onSuccess: (res) => {
@@ -455,6 +495,15 @@ export default function PharmacyPage() {
   const dashboard = dashboardQuery.data || {}
   const stats = dashboard.stats || {}
   const items = inventoryQuery.data || []
+  // Calculate this from batch rows as well as the dashboard summary. This
+  // keeps the alert correct while an older backend process/cache is being
+  // replaced and avoids trusting a previously concatenated Decimal string.
+  const expiredStockFromBatches = items.reduce((total, item) => (
+    total + (item.batches || [])
+      .filter(batch => Number(batch.quantity_rem || 0) > 0 && new Date(batch.expiry_date) < new Date())
+      .reduce((sum, batch) => sum + Number(batch.quantity_rem || 0), 0)
+  ), 0)
+  const expiredStock = items.length ? expiredStockFromBatches : Number(stats.expired_stock || 0)
   const prescriptions = prescriptionsQuery.data || []
   const suppliers = supplierQuery.data || []
   const pendingPrescriptions = prescriptions.filter(rx => rx.dispense_status === 'PENDING')
@@ -517,6 +566,7 @@ export default function PharmacyPage() {
 
   const buildDispenseRows = (rx) => (rx.items || []).map(line => {
     const match = findPrescriptionStockMatch(line)
+    const batch = match?.batches?.[0]
     return {
       rx_item_id: line.id,
       drug_name: line.drug_name,
@@ -529,6 +579,9 @@ export default function PharmacyPage() {
       item_id: match?.id || '',
       quantity: Number.parseInt(line.quantity || 1, 10),
       quantity_unit: line.quantity_unit === 'PACK' ? 'PACK' : 'LOOSE',
+      item_name: line.drug_name,
+      unit_price: match && batch ? Number(batch.selling_price || batch.mrp || 0) / packSize(match) : '',
+      gst_pct: match && batch ? Number(batch.gst_pct || 0) : '',
     }
   })
 
@@ -549,6 +602,19 @@ export default function PharmacyPage() {
     setRxPayment({ payment_method: 'CASH', payment_reference: '' })
   }
 
+  const printOutsidePrescription = () => {
+    if (!selectedPrescription) return
+    printPrescriptionHtml({
+      hospital: user?.hospital,
+      patient: selectedPrescription.patient,
+      doctor: selectedPrescription.doctor,
+      prescribed_at: selectedPrescription.prescribed_at,
+      items: selectedPrescription.items || [],
+    })
+    .then(() => outsidePrescriptionMut.mutate(selectedPrescription.id))
+    .catch(() => toast.error('Could not open the print dialog'))
+  }
+
   const dispensePrescription = () => {
     if (!selectedPrescription) return
     const missing = []
@@ -556,8 +622,24 @@ export default function PharmacyPage() {
     const lines = dispenseRows.map(row => {
       const match = stockItemsForDispense.find(item => item.id === row.item_id)
       if (!match) {
-        missing.push(row.drug_name)
-        return null
+        const unitPrice = Number(row.unit_price)
+        const gstPct = Number(row.gst_pct)
+        if (!Number.isFinite(unitPrice) || unitPrice <= 0) missing.push(`${row.drug_name} (selling price)`)
+        if (row.gst_pct === '' || !Number.isFinite(gstPct) || gstPct < 0 || gstPct > 100) missing.push(`${row.drug_name} (GST)`)
+        if (missing.length) return null
+        return {
+          rx_item_id: row.rx_item_id,
+          item_name: row.drug_name,
+          quantity: Number(row.quantity || 1),
+          quantity_unit: 'LOOSE',
+          unit_price: unitPrice,
+          gst_pct: gstPct,
+          dose: row.dose,
+          frequency: row.frequency,
+          duration: row.duration,
+          route: row.route,
+          instructions: row.instructions,
+        }
       }
       const quantity = Number.parseInt(row.quantity || 1, 10)
       const quantityUnit = row.quantity_unit === 'PACK' ? 'PACK' : 'LOOSE'
@@ -569,8 +651,11 @@ export default function PharmacyPage() {
       return {
         rx_item_id: row.rx_item_id,
         item_id: match.id,
+        item_name: row.drug_name,
         quantity,
         quantity_unit: quantityUnit,
+        unit_price: Number(row.unit_price || 0),
+        gst_pct: Number(row.gst_pct || 0),
         dose: row.dose,
         frequency: row.frequency,
         duration: row.duration,
@@ -596,7 +681,16 @@ export default function PharmacyPage() {
     const rows = dispenseRows.map(row => {
       const item = stockItemsForDispense.find(i => i.id === row.item_id)
       const batch = item?.batches?.[0]
-      if (!item || !batch) return null
+      if (!item) {
+        const quantity = Number(row.quantity || 1)
+        const rate = Number(row.unit_price || 0)
+        const gstPct = Number(row.gst_pct || 0)
+        if (!rate && !row.unit_price) return null
+        const gross = quantity * rate
+        const taxable = gross / (1 + gstPct / 100)
+        return { gross, tax: gross - taxable }
+      }
+      if (!batch) return null
       const quantity = baseQty(row.quantity, row.quantity_unit, item)
       const rate = Number(batch.selling_price || batch.mrp || 0) / packSize(item)
       const gross = quantity * rate
@@ -612,7 +706,8 @@ export default function PharmacyPage() {
 
   const dispenseReady = dispenseRows.length > 0 && dispenseRows.every(row => {
     const item = stockItemsForDispense.find(i => i.id === row.item_id)
-    return item && item.current_stock >= baseQty(row.quantity, row.quantity_unit, item)
+    if (!item) return Number(row.unit_price) > 0 && row.unit_price !== '' && row.gst_pct !== '' && Number(row.gst_pct) >= 0 && Number(row.gst_pct) <= 100
+    return item.current_stock >= baseQty(row.quantity, row.quantity_unit, item)
   })
 
   const addToCart = (item) => {
@@ -711,8 +806,8 @@ export default function PharmacyPage() {
         onMedicine={() => setShowAddModal(true)}
       />
 
-      {(stats.out_of_stock > 0 || stats.expired_stock > 0) && (
-        <div className="alert-red"><AlertTriangle size={18} /> <span><strong>{stats.out_of_stock || 0}</strong> out of stock items and <strong>{stats.expired_stock || 0}</strong> expired units need segregation.</span></div>
+      {(stats.out_of_stock > 0 || expiredStock > 0) && (
+        <div className="alert-red"><AlertTriangle size={18} /> <span><strong>{Number(stats.out_of_stock || 0)}</strong> out of stock items and <strong>{expiredStock}</strong> expired units need segregation.</span></div>
       )}
 
       <div className="tabs overflow-x-auto">
@@ -932,12 +1027,20 @@ export default function PharmacyPage() {
                       <div className="text-xs font-semibold text-white">{row.drug_name} {row.strength || ''}</div>
                       <div className="text-[11px] text-slate-400">{row.dose || '-'} | {row.frequency || '-'} | {row.duration || '-'}{row.instructions ? ` | ${row.instructions}` : ''}</div>
                     </div>
-                    <span className={hasStock ? 'badge-green' : 'badge-red'}>{item ? (hasStock ? 'Ready' : 'Low stock') : 'Match needed'}</span>
+                    <span className={item ? (hasStock ? 'badge-green' : 'badge-red') : 'badge-yellow'}>{item ? (hasStock ? 'Ready' : 'Low stock') : 'Unregistered — price/GST required'}</span>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
                     <div className="md:col-span-6">
                       <label className="label">Inventory Medicine</label>
-                      <select className="select" value={row.item_id} onChange={e => updateDispenseRow(index, { item_id: e.target.value })}>
+                      <select className="select" value={row.item_id} onChange={e => {
+                        const selected = stockItemsForDispense.find(stock => stock.id === e.target.value)
+                        const batch = selected?.batches?.[0]
+                        updateDispenseRow(index, {
+                          item_id: e.target.value,
+                          unit_price: selected && batch ? Number(batch.selling_price || batch.mrp || 0) / packSize(selected) : '',
+                          gst_pct: selected && batch ? Number(batch.gst_pct || 0) : '',
+                        })
+                      }}>
                         <option value="">Select stock item</option>
                         {stockItemsForDispense.map(stock => <option key={stock.id} value={stock.id}>{stock.generic_name}{stock.brand_name ? ` / ${stock.brand_name}` : ''} {stock.strength || ''} | {stockText(stock.current_stock, stock)}</option>)}
                       </select>
@@ -953,10 +1056,23 @@ export default function PharmacyPage() {
                         <option value="PACK">{item ? inferredPackUnit(item) : 'Pack'}</option>
                       </select>
                     </div>
+                    {!item && <>
+                      <div className="md:col-span-2">
+                        <label className="label">Selling price</label>
+                        <input type="number" min="0" step="0.01" className="input" value={row.unit_price} placeholder="Enter price" onChange={e => updateDispenseRow(index, { unit_price: e.target.value })} />
+                      </div>
+                      <div className="md:col-span-2">
+                        <label className="label">GST %</label>
+                        <select className="select" value={row.gst_pct} onChange={e => updateDispenseRow(index, { gst_pct: e.target.value })}>
+                          <option value="">Select GST</option>
+                          {gstSlabs.map(rate => <option key={rate} value={rate}>{rate}%</option>)}
+                        </select>
+                      </div>
+                    </>}
                     <div className="md:col-span-2">
                       <label className="label">Stock Impact</label>
                       <div className={`rounded-lg border px-3 py-2 text-xs ${hasStock ? 'border-brand-green text-brand-green' : 'border-brand-red text-brand-red'}`}>
-                        {item ? `${stockText(baseQuantity, item)} of ${stockText(item.current_stock, item)}` : 'No match'}
+                        {item ? `${stockText(baseQuantity, item)} of ${stockText(item.current_stock, item)}` : 'No inventory stock — bill only'}
                       </div>
                     </div>
                   </div>
@@ -974,6 +1090,7 @@ export default function PharmacyPage() {
                        </div>
                      </div>
                    )}
+                   {!item && <div className="mt-2 rounded border border-amber-400/30 bg-amber-400/10 px-2 py-1 text-[11px] text-amber-200">This medicine is not yet in pharmacy inventory. Enter selling price and GST; it will be billed without stock deduction.</div>}
                 </div>
               )
             })}
@@ -1005,6 +1122,7 @@ export default function PharmacyPage() {
           </div>
 
           <div className="flex gap-2">
+            <button className="btn flex-1" disabled={outsidePrescriptionMut.isPending || dispenseMut.isPending} onClick={printOutsidePrescription}><Printer size={16} /> Patient buying outside — Print prescription</button>
             <button className="btn-primary flex-1" disabled={dispenseMut.isPending || !dispenseReady} onClick={dispensePrescription}><ReceiptIndianRupee size={16} /> {dispenseMut.isPending ? 'Billing...' : 'Confirm & Bill'}</button>
             <button className="btn flex-1" disabled={dispenseMut.isPending} onClick={closeDispenseReview}>Cancel</button>
           </div>
@@ -1246,7 +1364,7 @@ function EditMedicineModal({ open, onClose, item, form, mutate }) {
   const { register, handleSubmit, watch, setValue } = form
   const packs = Number(watch('stock_packs') || 0)
   const loose = Number(watch('stock_loose') || 0)
-  const unitsPerPack = Math.max(1, Number(watch('units_per_pack') || 1))
+  const unitsPerPack = Math.max(0.000001, Number(watch('units_per_pack') || 1))
   const unit = watch('unit') || item?.unit || 'units'
   const packUnit = watch('pack_unit') || item?.pack_unit || 'packs'
   const totalStock = packs * unitsPerPack + loose
@@ -1437,7 +1555,7 @@ function BatchNoModal({ open, onClose, item, batch, form, mutate }) {
   const packs = Number(watch('pack_quantity') || 0)
   const loose = Number(watch('loose_quantity') || 0)
   const total = packs * size + loose
-  return <Modal open={open} onClose={onClose} title="Edit batch stock" size="md"><form onSubmit={handleSubmit(d => mutate.mutate({ item_id: item?.id, batch_id: batch?.id, batch_no: d.batch_no, pack_quantity: d.pack_quantity, loose_quantity: d.loose_quantity, quantity_rem: total, previous_quantity: batch?.quantity_rem }))} className="space-y-3"><div className="rounded-lg border border-default bg-navy-800 p-3 text-xs"><div className="font-semibold text-white">{item?.generic_name}</div><div className="text-slate-400">Current: {stockText(batch?.quantity_rem || 0, item)} | Expiry: {batch?.expiry_date ? fmt.date(batch.expiry_date) : '-'}</div></div><Field label="Batch number" required><input className="input" autoFocus placeholder="Enter real batch no" {...register('batch_no', { required: true })} /></Field><div className="grid grid-cols-1 md:grid-cols-2 gap-3"><Field label={`${item?.pack_unit || 'Packs'} in this batch`}><input type="number" min="0" className="input" {...register('pack_quantity')} /></Field><Field label={`${item?.unit || 'Loose units'} in this batch`}><input type="number" min="0" className="input" {...register('loose_quantity')} /></Field></div><div className="rounded-lg border border-default bg-navy-800 px-3 py-2 text-xs"><div className="text-slate-400">New batch quantity</div><div className="text-base font-semibold text-cyan">{stockText(total, item)}</div><div className="text-[11px] text-slate-500">{total} {inferredLooseUnit(item)} total</div></div><SubmitRow loading={mutate.isPending} label="Save batch stock" onCancel={onClose} /></form></Modal>
+  return <Modal open={open} onClose={onClose} title="Edit batch stock" size="md"><form onSubmit={handleSubmit(d => mutate.mutate({ item_id: item?.id, batch_id: batch?.id, batch_no: d.batch_no, original_batch_no: batch?.batch_no, pack_quantity: d.pack_quantity, loose_quantity: d.loose_quantity, quantity_rem: total, previous_quantity: batch?.quantity_rem }))} className="space-y-3"><div className="rounded-lg border border-default bg-navy-800 p-3 text-xs"><div className="font-semibold text-white">{item?.generic_name}</div><div className="text-slate-400">Current: {stockText(batch?.quantity_rem || 0, item)} | Expiry: {batch?.expiry_date ? fmt.date(batch.expiry_date) : '-'}</div></div><Field label="Batch number" required><input className="input" autoFocus placeholder="Enter real batch no" {...register('batch_no', { required: true })} /></Field><div className="grid grid-cols-1 md:grid-cols-2 gap-3"><Field label={`${item?.pack_unit || 'Packs'} in this batch`}><input type="number" min="0" className="input" {...register('pack_quantity')} /></Field><Field label={`${item?.unit || 'Loose units'} in this batch`}><input type="number" min="0" className="input" {...register('loose_quantity')} /></Field></div><div className="rounded-lg border border-default bg-navy-800 px-3 py-2 text-xs"><div className="text-slate-400">New batch quantity</div><div className="text-base font-semibold text-cyan">{stockText(total, item)}</div><div className="text-[11px] text-slate-500">{total} {inferredLooseUnit(item)} total</div></div><SubmitRow loading={mutate.isPending} label="Save batch stock" onCancel={onClose} /></form></Modal>
 }
 
 function AdjustModal({ open, onClose, item, form, mutate }) {
@@ -1571,13 +1689,7 @@ function ReceiptModal({ receipt, onClose }) {
   if (!receipt) return null
   const invoice = receipt.invoice || {}
   const print = () => {
-    const win = window.open('', '_blank', 'width=900,height=1000')
-    if (!win) return
-    win.document.open()
-    win.document.write(buildInvoiceHtml(receipt))
-    win.document.close()
-    win.focus()
-    setTimeout(() => win.print(), 100)
+    printHtml(buildInvoiceHtml(receipt), `Invoice ${invoice.invoice_no || ''}`).catch(() => toast.error('Could not open the print dialog'))
   }
   const rows = invoice.items || receipt.items || []
   return (
@@ -1635,6 +1747,29 @@ function ReceiptModal({ receipt, onClose }) {
       <div className="flex gap-2 mt-4"><button className="btn-primary flex-1" onClick={print}><Printer size={16} /> Print Document</button><button className="btn flex-1" onClick={onClose}>Close</button></div>
     </Modal>
   )
+}
+
+function printPrescriptionHtml(prescription) {
+  const hospital = prescription.hospital || {}
+  const patient = prescription.patient || {}
+  const doctor = prescription.doctor || {}
+  const rows = (prescription.items || []).map(item => `
+    <tr>
+      <td>${escapeHtml(item.drug_name)}${item.strength ? ` <span class="muted">${escapeHtml(item.strength)}</span>` : ''}</td>
+      <td>${escapeHtml(item.dose || '-')}</td>
+      <td>${escapeHtml(item.frequency || '-')}</td>
+      <td>${escapeHtml(item.duration || '-')}</td>
+      <td>${escapeHtml([item.route, item.instructions].filter(Boolean).join(' | ') || '-')}</td>
+    </tr>`).join('')
+  return printHtml(`<!doctype html><html><head><meta charset="utf-8"><title>Prescription</title><style>
+    body{font-family:Arial,sans-serif;color:#111;margin:32px;font-size:13px}h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px}.muted{color:#555}.header{border-bottom:2px solid #111;padding-bottom:12px}.patient{margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:5px}.rx{margin-top:20px;width:100%;border-collapse:collapse}.rx th,.rx td{border:1px solid #888;padding:8px;text-align:left;vertical-align:top}.rx th{background:#eee}.footer{margin-top:55px;display:flex;justify-content:space-between}.line{border-top:1px solid #555;width:220px;text-align:center;padding-top:6px}@media print{body{margin:18px}}
+  </style></head><body>
+    <div class="header"><h1>${escapeHtml(hospital.name || 'Hospital')}</h1><div class="muted">${escapeHtml([hospital.address, hospital.city, hospital.state, hospital.pincode].filter(Boolean).join(', ') || 'Hospital Prescription')}</div><div class="muted">Prescription date: ${escapeHtml(prescription.prescribed_at ? new Date(prescription.prescribed_at).toLocaleString('en-IN') : invoiceDate())}</div></div>
+    <div class="patient"><div><b>Patient:</b> ${escapeHtml(`${patient.first_name || ''} ${patient.last_name || ''}`.trim() || '-')}</div><div><b>UHID:</b> ${escapeHtml(patient.uhid || '-')}</div><div><b>Phone:</b> ${escapeHtml(patient.phone || '-')}</div><div><b>Doctor:</b> Dr. ${escapeHtml(`${doctor.first_name || ''} ${doctor.last_name || ''}`.trim() || '-')}</div></div>
+    <h2>Prescription</h2><table class="rx"><thead><tr><th>Medicine</th><th>Dose</th><th>Frequency</th><th>Duration</th><th>Route / Instructions</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="muted" style="margin-top:18px">This is a prescription copy only. Medicines are to be purchased outside the hospital pharmacy. No pharmacy bill has been generated.</div>
+    <div class="footer"><div class="line">Patient / Attendant</div><div class="line">Doctor Signature</div></div>
+  </body></html>`, 'Prescription')
 }
 
 function Field({ label, required, children }) {

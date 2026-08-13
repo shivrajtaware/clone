@@ -8,6 +8,7 @@ import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { Activity, AlertTriangle, BadgeIndianRupee, Beaker, CheckCircle2, ClipboardCheck, Download, FileUp, Microscope, Plus, Printer, ReceiptIndianRupee, TestTubes, Timer, Zap } from 'lucide-react'
 import api from '../utils/api'
+import { getSocketUrl } from '../utils/runtimeConfig'
 import Modal from '../components/common/Modal'
 import StatCard, { Badge, Spinner } from '../components/common/StatCard'
 import { fmt } from '../utils/helpers'
@@ -59,7 +60,7 @@ export default function LabPage() {
   
   const qc = useQueryClient()
   useEffect(() => {
-    const socket = io({ auth: { token: localStorage.getItem('token') } })
+      const socket = io(getSocketUrl(), { auth: { token: localStorage.getItem('token') } })
     socket.emit('join:lab')
     socket.on('lab:updated', () => {
       qc.invalidateQueries({ queryKey: ['lab-orders'] })
@@ -74,6 +75,7 @@ export default function LabPage() {
   const billForm = useForm({ defaultValues: { collect_payment: true, payment_mode: 'CASH', payment_reference: '' } })
   
   const [patientQuery, setPatientQuery] = useState('')
+  const [patientDisplay, setPatientDisplay] = useState('')
   const [patientSuggestions, setPatientSuggestions] = useState([])
   const [showPatientSuggestions, setShowPatientSuggestions] = useState(false)
 
@@ -470,17 +472,9 @@ export default function LabPage() {
         <form onSubmit={handleSubmit(d => orderMut.mutate({ ...d, tests: selectedTests, is_stat: d.is_stat === 'true' }))} className="space-y-4">
           <div className="relative">
             <label className="label">Patient Name or UHID *</label>
-            <input 
-              className="input" 
-              placeholder="Search by name, mobile, or UHID..."
-              autoComplete="off"
-              {...register('patient_id', { required: true })} 
-              onChange={(e) => {
-                register('patient_id').onChange(e)
-                setPatientQuery(e.target.value)
-                setShowPatientSuggestions(true)
-              }}
-            />
+            <input className="input" placeholder="Search by name, mobile, or UHID..." autoComplete="off" value={patientDisplay}
+              onChange={(e) => { setPatientDisplay(e.target.value); setPatientQuery(e.target.value); setValue('patient_id', '', { shouldValidate: true }); setShowPatientSuggestions(true) }} />
+            <input type="hidden" {...register('patient_id', { required: true })} />
     
           {showPatientSuggestions && patientSuggestions.length > 0 && (
             <ul className="absolute z-50 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-xl max-h-48 overflow-y-auto">
@@ -490,6 +484,7 @@ export default function LabPage() {
                 className="p-3 text-xs cursor-pointer hover:bg-cyan-50 border-b border-slate-100 last:border-b-0 text-slate-700"
                 onClick={() => {
                   setValue('patient_id', p.uhid, { shouldValidate: true })
+                  setPatientDisplay(`${p.first_name} ${p.last_name} — ${p.uhid}`)
                   setShowPatientSuggestions(false)
                   setPatientQuery('')
                   }}

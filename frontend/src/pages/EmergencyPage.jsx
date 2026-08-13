@@ -6,6 +6,7 @@ import { useForm } from 'react-hook-form'
 import toast from 'react-hot-toast'
 import { Activity, AlertTriangle, Ambulance, CheckCircle2, Clock, Radio, ShieldAlert, Siren, Stethoscope, Zap } from 'lucide-react'
 import api from '../utils/api'
+import { getSocketUrl } from '../utils/runtimeConfig'
 import Modal from '../components/common/Modal'
 import StatCard, { Badge, Spinner } from '../components/common/StatCard'
 import { fmt } from '../utils/helpers'
@@ -35,7 +36,7 @@ export default function EmergencyPage() {
   const [massCasualtyMode, setMassCasualtyMode] = useState(false)
   const qc = useQueryClient()
   useEffect(() => {
-    const socket = io({ auth: { token: localStorage.getItem('token') } })
+      const socket = io(getSocketUrl(), { auth: { token: localStorage.getItem('token') } })
     socket.emit('join:emergency')
     socket.on('emergency:updated', () => {
       qc.invalidateQueries({ queryKey: ['emergency-cases'] })

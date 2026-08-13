@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
+import { getSocketUrl } from '../utils/runtimeConfig'
 import Modal from '../components/common/Modal'
 import PatientSearch from '../components/patients/PatientSearch'
 import StatCard from '../components/common/StatCard'
@@ -19,7 +20,7 @@ export default function BedsPage() {
   const [selectedPatient, setSelectedPatient] = useState(null)
   const qc = useQueryClient()
     useEffect(() => {
-      const socket = io({ auth: { token: localStorage.getItem('token') } })
+      const socket = io(getSocketUrl(), { auth: { token: localStorage.getItem('token') } })
       socket.emit('join:beds')
       socket.on('beds:updated', () => {
         qc.invalidateQueries({ queryKey: ['beds'] })
@@ -324,4 +325,3 @@ export default function BedsPage() {
     </div>
   )
 }
-

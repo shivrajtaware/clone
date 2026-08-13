@@ -5,10 +5,12 @@ import { useForm } from 'react-hook-form'
 import { Camera, CheckCircle2, ClipboardCheck, Download, FileText, HeartPulse, Image, Play, Plus, Printer, ScanLine, ShieldCheck, Stethoscope, UploadCloud } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
+import { getSocketUrl } from '../utils/runtimeConfig'
 import Modal from '../components/common/Modal'
 import StatCard, { Badge, Spinner } from '../components/common/StatCard'
 import PatientSearch from '../components/patients/PatientSearch'
 import { fmt } from '../utils/helpers'
+import { printHtml } from '../utils/print'
 
 const checks = {
   arrival: [['consent_done', 'Consent'], ['pre_anaesthesia', 'PAC'], ['blood_group_done', 'Blood'], ['fasting_confirmed', 'Fasting']],
@@ -204,7 +206,7 @@ export default function OTPage() {
   const active = list.filter(x => x.status === 'IN_PROGRESS')
   const refresh = () => { qc.invalidateQueries({ queryKey: ['ot-schedule'] }); qc.invalidateQueries({ queryKey: ['ot-rooms'] }); qc.invalidateQueries({ queryKey: ['ot-beds'] }) }
   useEffect(() => {
-    const socket = io(import.meta.env.VITE_API_URL, {
+      const socket = io(getSocketUrl(), {
       auth: { token: localStorage.getItem('token') }
     })
 
@@ -337,8 +339,7 @@ export default function OTPage() {
           <div>Nursing sign-out</div>
         </footer>
       </div>`
-    const w = window.open('', '_blank')
-    w.document.write(`<html><head><title>OT Case Sheet</title><style>
+    printHtml(`<html><head><title>OT Case Sheet</title><style>
       @page{size:A4;margin:14mm}
       body{font-family:Inter,Arial,sans-serif;background:#f4f7fb;color:#111827;margin:0}
       .doc{background:white;max-width:920px;margin:0 auto;padding:28px;border:1px solid #d8e1ee}
@@ -354,9 +355,7 @@ export default function OTPage() {
       pre{white-space:pre-wrap;font:12px/1.55 "Consolas",monospace;margin:0}
       .photos{display:grid;grid-template-columns:1fr 1fr;gap:10px}.photo{border:1px solid #e5e7eb;border-radius:8px;overflow:hidden}.photo img{width:100%;display:block}
       footer{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:28px}footer div{border-top:1px solid #111827;padding-top:8px;font-size:11px;color:#334155}
-    </style></head><body>${html}</body></html>`)
-    w.document.close()
-    w.print()
+    </style></head><body>${html}</body></html>`, 'OT Case Sheet').catch(() => toast.error('Could not open the print dialog'))
   }
 
   return (

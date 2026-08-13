@@ -23,7 +23,7 @@ const stockLabel = (quantity, item) => {
   return `${packs} ${item?.pack_unit || 'pack'}${packs === 1 ? '' : 's'}${loose ? ` + ${loose} ${item?.unit || 'unit'}${loose === 1 ? '' : 's'}` : ''}`;
 };
 const toBaseUnits = (quantity, unitType, item) => {
-  const qty = toInt(quantity, 'quantity');
+  const qty = toFloat(quantity, 'quantity');
   if (qty <= 0) throw new HttpError(400, 'Quantity must be greater than zero');
   return unitType === 'PACK' ? qty * packSize(item) : qty;
 };
@@ -83,6 +83,13 @@ const positiveInt = (row, key, errors, required = true) => {
   if (!Number.isFinite(value) || value < 0) errors.push(`Row ${rowNumber(row)}: ${key} must be a positive number`);
   return Number.isFinite(value) ? value : 0;
 };
+const positiveNumber = (row, key, errors, required = true) => {
+  const raw = row[key];
+  if ((raw === undefined || raw === null || raw === '') && !required) return 0;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) errors.push(`Row ${rowNumber(row)}: ${key} must be a positive number`);
+  return Number.isFinite(value) ? value : 0;
+};
 const positiveFloat = (row, key, errors, required = true) => {
   const raw = row[key];
   if ((raw === undefined || raw === null || raw === '') && !required) return null;
@@ -127,7 +134,7 @@ const purchaseTaxFields = ({ quantity, packQuantity = 0, looseQuantity = 0, unit
   const qty = Math.max(0, Number(quantity || 0));
   const packQty = Math.max(0, Number(packQuantity || 0));
   const looseQty = Math.max(0, Number(looseQuantity || 0));
-  const packSizeValue = Math.max(1, Number(unitsPerPack || 1));
+  const packSizeValue = Math.max(0.000001, Number(unitsPerPack || 1));
   const hasPurchaseData = [costPrice, taxableRate, cgstAmt, sgstAmt, igstAmt, purchaseTotal]
     .some(value => value !== null && value !== undefined && value !== '' && Number(value) !== 0);
   if (!hasPurchaseData) {
@@ -204,13 +211,31 @@ const enrichItem = (item) => {
   const mrpValue = activeBatches.reduce((sum, b) => sum + Number(b.quantity_rem || 0) * Number(b.mrp || 0), 0);
   const avgMargin = stockValue > 0 ? ((retailValue - stockValue) / stockValue) * 100 : 0;
 
+  // Prisma returns Decimal fields as Decimal instances/strings. Normalize the
+  // values exposed by the pharmacy API so JS aggregation never concatenates
+  // quantities (for example: 0 + "3" + "000" => "03000").
+  const currentStock = Number(item.current_stock || 0);
+  const unitsPerPack = Number(item.units_per_pack || 1);
+  const normalizedBatches = batches.map(batch => ({
+    ...batch,
+    quantity_in: Number(batch.quantity_in || 0),
+    quantity_rem: Number(batch.quantity_rem || 0),
+    mrp: Number(batch.mrp || 0),
+    selling_price: batch.selling_price == null ? null : Number(batch.selling_price),
+    cost_price: batch.cost_price == null ? null : Number(batch.cost_price),
+    gst_pct: batch.gst_pct == null ? null : Number(batch.gst_pct),
+  }));
+
   return {
     ...item,
-    is_low_stock: item.current_stock <= item.min_stock_level && item.current_stock > 0,
-    is_out_of_stock: item.current_stock <= 0,
-    is_overstock: item.current_stock >= item.max_stock_level,
+    units_per_pack: unitsPerPack,
+    current_stock: currentStock,
+    batches: normalizedBatches,
+    is_low_stock: currentStock <= item.min_stock_level && currentStock > 0,
+    is_out_of_stock: currentStock <= 0,
+    is_overstock: currentStock >= item.max_stock_level,
     expiring_soon: nearExpiryBatches.length > 0,
-    expired_stock: expiredBatches.reduce((sum, b) => sum + b.quantity_rem, 0),
+    expired_stock: expiredBatches.reduce((sum, b) => sum + Number(b.quantity_rem || 0), 0),
     nearest_expiry: activeBatches[0]?.expiry_date || null,
     stock_display: stockLabel(item.current_stock, item),
     pack_size_label: `${packSize(item)} ${item.unit}/${item.pack_unit || 'pack'}`,
@@ -350,7 +375,12 @@ router.get('/prescriptions', async (req, res) => {
     : [];
   const dispenseMap = new Map(dispenses.map(d => [d.prescription_id, d]));
 
-  const pharmacyPrescriptions = prescriptions.map(p => ({ ...p, items: p.items.filter(item => !item.collect_bill_here) })).filter(p => p.items.length);
+  // Keep unregistered medicines in the pharmacy queue even if the doctor
+  // selected “collect bill here”; only linked inventory items issued in the
+  // OPD room are excluded from pharmacy billing.
+  const pharmacyPrescriptions = prescriptions
+    .map(p => ({ ...p, items: p.items.filter(item => !item.collect_bill_here || !item.pharmacy_item_id) }))
+    .filter(p => p.items.length);
   res.json({
     success: true,
     data: pharmacyPrescriptions.map(p => ({
@@ -400,13 +430,13 @@ router.get('/dashboard', async (req, res) => {
     data: {
       stats: {
         total_items: enriched.length,
-        total_stock_units: enriched.reduce((sum, i) => sum + i.current_stock, 0),
+        total_stock_units: enriched.reduce((sum, i) => sum + Number(i.current_stock || 0), 0),
         inventory_value: toMoney(enriched.reduce((sum, i) => sum + i.stock_value, 0)),
         low_stock: enriched.filter(i => i.is_low_stock).length,
         out_of_stock: enriched.filter(i => i.is_out_of_stock).length,
         overstock: enriched.filter(i => i.is_overstock).length,
         near_expiry: enriched.filter(i => i.expiring_soon).length,
-        expired_stock: enriched.reduce((sum, i) => sum + i.expired_stock, 0),
+        expired_stock: enriched.reduce((sum, i) => sum + Number(i.expired_stock || 0), 0),
         suppliers,
         sales_today: toMoney(salesToday),
         gst_today: toMoney(todayInvoices.reduce((sum, row) => sum + Number(row.invoice?.tax_total || 0), 0)),
@@ -419,8 +449,8 @@ router.get('/dashboard', async (req, res) => {
       },
       fast_moving: recentDispenses.flatMap(d => d.items).reduce((rows, item) => {
         const existing = rows.find(row => row.item_id === item.item_id);
-        if (existing) existing.quantity += item.quantity;
-        else rows.push({ item_id: item.item_id, name: item.item.generic_name, brand: item.item.brand_name, quantity: item.quantity });
+        if (existing) existing.quantity += Number(item.quantity || 0);
+        else rows.push({ item_id: item.item_id, name: item.item.generic_name, brand: item.item.brand_name, quantity: Number(item.quantity || 0) });
         return rows;
       }, []).sort((a, b) => b.quantity - a.quantity).slice(0, 8),
       dead_stock: enriched.filter(i => i.current_stock > 0 && !recentDispenses.some(d => d.items.some(di => di.item_id === i.id))).slice(0, 8),
@@ -593,10 +623,10 @@ router.post('/inventory/import', async (req, res) => {
     const r = normalizeImportRow({ ...row, __row: row.__row || index + 2 });
     const category = norm(r.category || 'OTHER').toUpperCase();
     if (!DRUG_CATEGORIES.includes(category)) errors.push(`Row ${rowNumber(r)}: category must be one of ${DRUG_CATEGORIES.join(', ')}`);
-    const unitsPerPack = positiveInt({ ...r, units_per_pack: r.units_per_pack || 1 }, 'units_per_pack', errors);
-    const packQuantity = positiveInt(r, 'pack_quantity', errors, false);
-    const looseQuantity = positiveInt(r, 'loose_quantity', errors, false);
-    const quantity = packQuantity * Math.max(1, unitsPerPack || 1) + looseQuantity;
+    const unitsPerPack = positiveNumber({ ...r, units_per_pack: r.units_per_pack || 1 }, 'units_per_pack', errors);
+    const packQuantity = positiveNumber(r, 'pack_quantity', errors, false);
+    const looseQuantity = positiveNumber(r, 'loose_quantity', errors, false);
+    const quantity = packQuantity * Math.max(0.000001, unitsPerPack || 1) + looseQuantity;
     if (quantity <= 0) errors.push(`Row ${rowNumber(r)}: stock quantity is required. Add pack_quantity or loose_quantity/qty`);
     const expiry = optionalImportDate(r, 'expiry_date', errors);
     if (expiry && expiry < new Date().setHours(0, 0, 0, 0)) errors.push(`Row ${rowNumber(r)}: expiry_date is already expired`);
@@ -645,7 +675,7 @@ router.post('/inventory/import', async (req, res) => {
       strength: norm(r.strength),
       unit: norm(r.unit || 'unit'),
       pack_unit: norm(r.pack_unit || 'pack'),
-      units_per_pack: Math.max(1, unitsPerPack || 1),
+      units_per_pack: Math.max(0.000001, unitsPerPack || 1),
       min_stock_level: positiveInt(r, 'min_stock_level', errors, false) || 10,
       max_stock_level: positiveInt(r, 'max_stock_level', errors, false) || 1000,
       reorder_quantity: positiveInt(r, 'reorder_quantity', errors, false) || 100,
@@ -758,7 +788,7 @@ router.put('/inventory/:id/stock', async (req, res) => {
   const item = await prisma.$transaction(async (tx) => {
     const before = await tx.pharmacyItem.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId }, include: { batches: { orderBy: { expiry_date: 'asc' } } } });
     if (!before) throw new HttpError(404, 'Medicine not found');
-    const target = (Math.max(0, toInt(req.body.pack_quantity || 0, 'pack_quantity')) * packSize(before)) + Math.max(0, toInt(req.body.loose_quantity || 0, 'loose_quantity'));
+    const target = (Math.max(0, toFloat(req.body.pack_quantity || 0, 'pack_quantity')) * packSize(before)) + Math.max(0, toFloat(req.body.loose_quantity || 0, 'loose_quantity'));
     const delta = target - before.current_stock;
     if (delta > 0) {
       const batch = before.batches.find(b => b.quantity_rem > 0) || before.batches[0];
@@ -787,8 +817,8 @@ router.post('/inventory/:id/batch', async (req, res) => {
     const item = await tx.pharmacyItem.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId } });
     if (!item) throw new HttpError(404, 'Medicine not found');
     const quantity = pack_quantity !== undefined || loose_quantity !== undefined
-      ? (toInt(pack_quantity || 0, 'pack_quantity') * packSize(item)) + toInt(loose_quantity || 0, 'loose_quantity')
-      : toInt(quantity_in, 'quantity_in');
+      ? (toFloat(pack_quantity || 0, 'pack_quantity') * packSize(item)) + toFloat(loose_quantity || 0, 'loose_quantity')
+      : toFloat(quantity_in, 'quantity_in');
     if (quantity <= 0) throw new HttpError(400, 'Received quantity must be greater than zero');
     const mrpValue = toFloat(mrp, 'mrp');
     const gstPct = requireGstPercent(gst_pct, 'GST %');
@@ -831,26 +861,36 @@ router.post('/inventory/:id/batch', async (req, res) => {
 
 router.patch('/inventory/:id/batches/:batchId', async (req, res) => {
   const { batch_no, pack_quantity, loose_quantity, quantity_rem } = req.body;
-  const cleanBatchNo = norm(batch_no);
-  if (!cleanBatchNo) throw new HttpError(400, 'Batch number is required');
+  const batchNumberWasSubmitted = batch_no !== undefined;
   const batch = await prisma.$transaction(async (tx) => {
     const item = await tx.pharmacyItem.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId } });
     if (!item) throw new HttpError(404, 'Medicine not found');
-    const existing = await tx.drugBatch.findFirst({
-      where: { item_id: req.params.id, batch_no: cleanBatchNo, id: { not: req.params.batchId } },
-    });
-    if (existing) throw new HttpError(409, 'This batch number already exists for this medicine');
     const before = await tx.drugBatch.findFirst({ where: { id: req.params.batchId, item_id: req.params.id } });
     if (!before) throw new HttpError(404, 'Batch not found');
+    const cleanBatchNo = batchNumberWasSubmitted ? norm(batch_no) : before.batch_no;
+    if (!cleanBatchNo) throw new HttpError(400, 'Batch number is required');
+
+    // A stock-only change must never be rejected by batch-number validation.
+    // Check uniqueness only when the batch number really changes.
+    const batchNumberChanged = batchNumberWasSubmitted
+      && norm(before.batch_no).toUpperCase() !== cleanBatchNo.toUpperCase();
+    if (batchNumberChanged) {
+      const batches = await tx.drugBatch.findMany({
+        where: { item_id: req.params.id, id: { not: before.id } },
+        select: { id: true, batch_no: true },
+      });
+      const existing = batches.find(candidate => norm(candidate.batch_no).toUpperCase() === cleanBatchNo.toUpperCase());
+      if (existing) throw new HttpError(409, 'This batch number already exists for this medicine');
+    }
     const hasQuantity = quantity_rem !== undefined || pack_quantity !== undefined || loose_quantity !== undefined;
     const nextQuantity = hasQuantity
       ? quantity_rem !== undefined
-        ? Math.max(0, toInt(quantity_rem, 'quantity_rem'))
-        : (Math.max(0, toInt(pack_quantity || 0, 'pack_quantity')) * packSize(item)) + Math.max(0, toInt(loose_quantity || 0, 'loose_quantity'))
+        ? Math.max(0, toFloat(quantity_rem, 'quantity_rem'))
+        : (Math.max(0, toFloat(pack_quantity || 0, 'pack_quantity')) * packSize(item)) + Math.max(0, toFloat(loose_quantity || 0, 'loose_quantity'))
       : before.quantity_rem;
     const delta = nextQuantity - before.quantity_rem;
     if (delta < 0 && item.current_stock < Math.abs(delta)) throw new HttpError(409, 'Batch adjustment exceeds available stock');
-    const updated = await tx.drugBatch.update({ where: { id: req.params.batchId }, data: { batch_no: cleanBatchNo, ...(hasQuantity && { quantity_rem: nextQuantity }) } });
+    const updated = await tx.drugBatch.update({ where: { id: req.params.batchId }, data: { ...(batchNumberChanged && { batch_no: cleanBatchNo }), ...(hasQuantity && { quantity_rem: nextQuantity }) } });
     if (delta) await tx.pharmacyItem.update({ where: { id: item.id }, data: { current_stock: { [delta > 0 ? 'increment' : 'decrement']: Math.abs(delta) } } });
     await audit(tx, req, hasQuantity ? 'BATCH_STOCK_UPDATED' : 'BATCH_NUMBER_UPDATED', updated.id, { batch_no: updated.batch_no, quantity_rem: updated.quantity_rem, stock_display: stockLabel(updated.quantity_rem, item), delta }, { batch_no: before.batch_no, quantity_rem: before.quantity_rem });
     return updated;
@@ -860,7 +900,7 @@ router.patch('/inventory/:id/batches/:batchId', async (req, res) => {
 
 router.post('/inventory/:id/adjust', async (req, res) => {
   const { type = 'ADJUSTMENT', quantity, reason, batch_no } = req.body;
-  const qty = Math.abs(toInt(quantity, 'quantity'));
+  const qty = Math.abs(toFloat(quantity, 'quantity'));
   const direction = ['RECEIPT', 'RETURN', 'RECONCILIATION_PLUS'].includes(type) ? 1 : -1;
   const item = await prisma.$transaction(async (tx) => {
     const before = await tx.pharmacyItem.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId } });
@@ -891,6 +931,7 @@ router.post('/dispense', async (req, res) => {
     quantity_unit: String(i.quantity_unit || i.unit_type || 'LOOSE').toUpperCase() === 'PACK' ? 'PACK' : 'LOOSE',
     batch_no: i.batch_no || null,
     unit_price: i.unit_price ? toFloat(i.unit_price, 'unit_price') : null,
+    gst_pct: i.gst_pct,
     dose: norm(i.dose),
     frequency: norm(i.frequency),
     duration: norm(i.duration),
@@ -925,6 +966,25 @@ router.post('/dispense', async (req, res) => {
       : [];
     const prescriptionItemMap = new Map(prescriptionItems.map(item => [item.id, item]));
     for (const i of dispenseItems) {
+      if (!i.item_id) {
+        const quantity = toFloat(i.quantity || 1, 'quantity');
+        const unitPrice = toFloat(i.unit_price, 'unit_price');
+        const gstPct = i.gst_pct === undefined || i.gst_pct === '' ? 0 : toFloat(i.gst_pct, 'gst_pct');
+        if (quantity <= 0) throw new HttpError(400, `Quantity must be greater than zero for ${i.item_name || 'unregistered medicine'}`);
+        if (unitPrice <= 0) throw new HttpError(400, `Selling price must be greater than zero for ${i.item_name || 'unregistered medicine'}`);
+        if (gstPct < 0 || gstPct > 100) throw new HttpError(400, `GST must be between 0 and 100 for ${i.item_name || 'unregistered medicine'}`);
+        expandedItems.push({
+          id: uuidv4(), item_id: null, quantity, batch_no: null,
+          mrp_per_unit: unitPrice, unit_price: unitPrice, gst_pct: gstPct,
+          item_name: i.item_name || 'Unregistered medicine', expiry_date: null,
+          mrp: unitPrice, selling_price: unitPrice, rx_item_id: i.rx_item_id || null,
+          prescribed_drug_name: i.item_name || null, prescribed_generic_name: null,
+          prescribed_strength: null, prescribed_form: null,
+          dose: i.dose || null, frequency: i.frequency || null, duration: i.duration || null,
+          route: i.route || null, instructions: i.instructions || null,
+        });
+        continue;
+      }
       const pharmacyItem = await tx.pharmacyItem.findFirst({ where: { id: i.item_id, hospital_id: req.hospitalId } });
       if (!pharmacyItem) throw new HttpError(404, `Medicine not found: ${i.item_id}`);
       const prescriptionItem = i.rx_item_id ? prescriptionItemMap.get(i.rx_item_id) : null;
@@ -966,12 +1026,14 @@ router.post('/dispense', async (req, res) => {
       data: {
         id: uuidv4(), hospital_id: req.hospitalId, dispense_no, patient_id: resolvedPatientId, prescription_id, dispensed_by: req.user.id,
         notes: req.body.notes || (resolvedPatientId ? null : `Walk-in sale${walkInCustomer.name ? `: ${walkInCustomer.name}` : ''}`),
-        items: { create: expandedItems.map(({ gst_pct, item_name, expiry_date, mrp, mrp_per_unit, selling_price, rx_item_id, prescribed_drug_name, prescribed_generic_name, prescribed_strength, prescribed_form, dose, frequency, duration, route, instructions, ...i }) => i) },
+        items: { create: expandedItems.filter(i => i.item_id).map(({ gst_pct, item_name, expiry_date, mrp, mrp_per_unit, selling_price, rx_item_id, prescribed_drug_name, prescribed_generic_name, prescribed_strength, prescribed_form, dose, frequency, duration, route, instructions, ...i }) => i) },
       },
     });
     for (const i of expandedItems) {
-      await tx.pharmacyItem.update({ where: { id: i.item_id }, data: { current_stock: { decrement: i.quantity } } });
-      await tx.drugBatch.updateMany({ where: { item_id: i.item_id, batch_no: i.batch_no }, data: { quantity_rem: { decrement: i.quantity } } });
+      if (i.item_id) {
+        await tx.pharmacyItem.update({ where: { id: i.item_id }, data: { current_stock: { decrement: i.quantity } } });
+        await tx.drugBatch.updateMany({ where: { item_id: i.item_id, batch_no: i.batch_no }, data: { quantity_rem: { decrement: i.quantity } } });
+      }
     }
     const invoice = calculateInvoice(expandedItems, { ...gst, invoice_no: dispense_no, payment_method: paymentMethod });
     let bill = null;
@@ -1003,7 +1065,7 @@ router.post('/dispense', async (req, res) => {
               id: uuidv4(),
               category: 'Pharmacy',
               description: `${item.item_name}${item.batch_no ? ` (${item.batch_no})` : ''}`,
-              quantity: Math.max(1, Math.round(Number(item.quantity || 1))),
+              quantity: Number(item.quantity || 1),
               unit_price: Number(item.unit_price || 0),
               total: Number(item.line_total || 0),
             })),
@@ -1040,6 +1102,49 @@ router.post('/dispense', async (req, res) => {
 
   emitToPharmacy(req.hospitalId, 'pharmacy:updated', { type: 'DISPENSE' });
   res.status(201).json({ success: true, message: 'Dispensed successfully', data: dispense });
+});
+
+// Close a prescription as "purchased outside". This intentionally creates no
+// bill and no dispense items, so inventory is never touched. The Dispense row
+// is used only as the pharmacy fulfillment marker for the queue.
+router.post('/prescriptions/:id/purchased-outside', async (req, res) => {
+  const prescription = await prisma.prescription.findFirst({
+    where: { id: req.params.id, patient: { hospital_id: req.hospitalId } },
+    select: { id: true, patient_id: true },
+  });
+  if (!prescription) throw new HttpError(404, 'Prescription not found');
+
+  const result = await prisma.$transaction(async (tx) => {
+    const existing = await tx.dispense.findFirst({
+      where: { hospital_id: req.hospitalId, prescription_id: prescription.id },
+      select: { dispense_no: true },
+    });
+    if (existing) throw new HttpError(409, `Prescription already closed as ${existing.dispense_no}`);
+
+    const dispense = await tx.dispense.create({
+      data: {
+        id: uuidv4(),
+        hospital_id: req.hospitalId,
+        dispense_no: `EXT-${new Date().getFullYear()}-${uuidv4().slice(0, 8).toUpperCase()}`,
+        patient_id: prescription.patient_id,
+        prescription_id: prescription.id,
+        dispensed_by: req.user.id,
+        notes: 'Patient chose to purchase prescribed medicines outside hospital pharmacy',
+        items: { create: [] },
+      },
+    });
+    await audit(tx, req, 'PRESCRIPTION_PURCHASED_OUTSIDE', dispense.id, {
+      prescription_id: prescription.id,
+      patient_id: prescription.patient_id,
+      dispense_no: dispense.dispense_no,
+      inventory_affected: false,
+      bill_created: false,
+    });
+    return dispense;
+  });
+
+  emitToPharmacy(req.hospitalId, 'pharmacy:updated', { type: 'PRESCRIPTION_PURCHASED_OUTSIDE', prescription_id: prescription.id });
+  res.status(201).json({ success: true, message: 'Prescription marked as purchased outside', data: result });
 });
 
 router.get('/low-stock', async (req, res) => {
@@ -1110,8 +1215,8 @@ router.post('/purchase-orders/:id/receive', async (req, res) => {
       const item = await tx.pharmacyItem.findFirst({ where: { id: row.item_id, hospital_id: req.hospitalId } });
       if (!item) throw new HttpError(404, `Medicine not found: ${row.item_id}`);
       const quantity = row.pack_quantity !== undefined || row.loose_quantity !== undefined
-        ? (toInt(row.pack_quantity || 0, 'pack_quantity') * packSize(item)) + toInt(row.loose_quantity || 0, 'loose_quantity')
-        : toInt(row.quantity || row.quantity_in, 'quantity');
+        ? (toFloat(row.pack_quantity || 0, 'pack_quantity') * packSize(item)) + toFloat(row.loose_quantity || 0, 'loose_quantity')
+        : toFloat(row.quantity || row.quantity_in, 'quantity');
       if (quantity <= 0) throw new HttpError(400, 'Received quantity must be greater than zero');
       const mrpValue = toFloat(row.mrp, 'mrp');
       const gstPct = requireGstPercent(row.gst_pct, 'GST %');

@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import api from '../../utils/api'
 import { Spinner } from '../common/StatCard'
+import { printHtml } from '../../utils/print'
 
 export default function BarcodeModal({ patientId, patientName, onClose }) {
   const queryClient = useQueryClient()
@@ -39,8 +40,7 @@ export default function BarcodeModal({ patientId, patientName, onClose }) {
 
   const handlePrint = () => {
     if (patient?.barcode_image) {
-      const printWindow = window.open('')
-      printWindow.document.write(`
+      printHtml(`
         <html>
           <head>
             <title>Patient Barcode - ${patient.uhid}</title>
@@ -59,11 +59,9 @@ export default function BarcodeModal({ patientId, patientName, onClose }) {
               </div>
               <img src="${patient.barcode_image}" class="barcode-img" alt="Patient Barcode" />
             </div>
-            <script>window.print();</script>
           </body>
         </html>
-      `)
-      printWindow.document.close()
+      `, `Patient Barcode - ${patient.uhid}`).catch(() => toast.error('Could not open the print dialog'))
     }
   }
 

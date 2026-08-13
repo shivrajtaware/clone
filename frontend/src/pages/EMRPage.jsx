@@ -678,7 +678,10 @@ function MedicineSuggestInput({ item, onChange }) {
               <div className="text-[11px] text-slate-400">{medicine.generic_name} | {medicine.form} {medicine.strength || ''} | Stock {medicine.stock_display || `${medicine.current_stock} ${medicine.unit}`} | {medicine.pack_size_label}</div>
             </button>
           ))}
-          {!suggestions.isLoading && !rows.length && <div className="px-3 py-2 text-xs text-slate-400">No matching pharmacy stock found.</div>}
+          {!suggestions.isLoading && !rows.length && <button type="button" className="block w-full px-3 py-2 text-left hover:bg-navy-800" onMouseDown={() => { onChange({ drug_name: query, item_id: '', generic_name: '' }); setOpen(false) }}>
+            <div className="text-xs font-semibold text-cyan">Use “{query}” as prescribed medicine</div>
+            <div className="text-[11px] text-slate-400">Not in inventory now — pharmacy can enter price and GST during billing.</div>
+          </button>}
         </div>
       )}
     </div>

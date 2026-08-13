@@ -31,7 +31,7 @@ const inferredPackUnit = (item = {}) => {
 };
 
 const packSize = (item) => {
-  const size = Math.max(1, Number(item?.units_per_pack || 1));
+  const size = Math.max(0.000001, Number(item?.units_per_pack || 1));
   if (size > 1) return size;
   if (['tablet', 'capsule'].includes(normalizedDrugForm(item?.form)) && isStripLikeUnit(item?.unit || item?.pack_unit)) return 10;
   return size;

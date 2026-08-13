@@ -61,7 +61,13 @@ const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
   .map(origin => origin.trim().toLowerCase())
   .filter(Boolean);
 
-allowedOrigins.push('http://localhost:5000', 'http://127.0.0.1:5000');
+allowedOrigins.push(
+  'http://localhost:5000',
+  'http://127.0.0.1:5000',
+  'http://tauri.localhost',
+  'https://tauri.localhost',
+  'tauri://localhost',
+);
 
 if (process.env.NODE_ENV === 'development') {
   allowedOrigins.push('http://127.0.0.1:5173', 'http://localhost:5174', 'http://127.0.0.1:5174');

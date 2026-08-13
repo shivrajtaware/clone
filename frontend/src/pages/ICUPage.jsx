@@ -17,6 +17,7 @@ import {
   Waves,
 } from 'lucide-react'
 import api from '../utils/api'
+import { getSocketUrl } from '../utils/runtimeConfig'
 import StatCard, { EmptyState } from '../components/common/StatCard'
 import Modal from '../components/common/Modal'
 import PatientSearch from '../components/patients/PatientSearch'
@@ -73,7 +74,7 @@ export default function ICUPage() {
 
   useEffect(() => {
     if (!token) return
-    const socket = io(import.meta.env.VITE_SOCKET_URL || '', { auth: { token }, transports: ['websocket', 'polling'] })
+      const socket = io(getSocketUrl(), { auth: { token }, transports: ['websocket', 'polling'] })
     socket.emit('join:icu')
     socket.on('vitals:update', payload => {
       const map = {}

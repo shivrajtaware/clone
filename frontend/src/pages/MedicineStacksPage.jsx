@@ -3,6 +3,7 @@ import { io } from 'socket.io-client'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
+import { getSocketUrl } from '../utils/runtimeConfig'
 import Modal from '../components/common/Modal'
 import StatCard, { Badge, EmptyState, Spinner } from '../components/common/StatCard'
 import { DRUG_FORMS, DRUG_ROUTES } from '../utils/drugForms'
@@ -74,7 +75,7 @@ export default function MedicineStacksPage() {
   const [form, setForm] = useState(newForm)
   const qc = useQueryClient()
   useEffect(() => {
-    const socket = io({ auth: { token: localStorage.getItem('token') } })
+      const socket = io(getSocketUrl(), { auth: { token: localStorage.getItem('token') } })
     socket.on('medicineStacks:updated', () => {
       qc.invalidateQueries({ queryKey: ['medicine-stacks'] })
     })

@@ -5,19 +5,20 @@ const rbac = require('../middleware/rbac');
 const { prisma } = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
-const { cleanString, requireFields, sanitizeModelInput, toDate } = require('../utils/prismaInput');
+const { HttpError, cleanString, requireFields, sanitizeModelInput, toDate } = require('../utils/prismaInput');
 const { ALL_MODULES, ROLE_DEFAULT_MODULES, normalizeModules } = require('../utils/modulePermissions');
 const { emitToHospital } = require('../config/socket');
 router.use(auth);
 
 router.get('/', async (req, res) => {
-  const { role, department_id, search } = req.query;
+  const { role, department_id, search, include_inactive } = req.query;
   const users = await prisma.user.findMany({
     where: {
       hospital_id: req.hospitalId,
       role: { not: 'SUPER_ADMIN' },
       ...(role && { role }),
       ...(department_id && { department_id }),
+      ...(include_inactive === 'true' ? {} : { is_active: true }),
       ...(search && { OR: [{ first_name: { contains: search, mode: 'insensitive' } }, { last_name: { contains: search, mode: 'insensitive' } }, { email: { contains: search, mode: 'insensitive' } }] }),
     },
     include: { department: { select: { name: true } }, doctor_profile: true },
@@ -98,6 +99,29 @@ router.put('/:id', async (req, res) => {
   const user = await prisma.user.update({ where: { id: req.params.id }, data: updateData });
   const { password: _, refresh_token, ...safe } = user;
   res.json({ success: true, data: safe });
+});
+
+// Staff records are retained for clinical and audit history. "Delete" removes
+// their access and hides them from the active directory instead of erasing a
+// person referenced by past appointments, notes, or prescriptions.
+router.delete('/:id', rbac('HOSPITAL_ADMIN', 'HR_MANAGER'), async (req, res) => {
+  if (req.params.id === req.user.id) {
+    throw new HttpError(400, 'You cannot delete your own staff account');
+  }
+  const staff = await prisma.user.findFirst({
+    where: { id: req.params.id, hospital_id: req.hospitalId, role: { not: 'SUPER_ADMIN' } },
+  });
+  if (!staff) throw new HttpError(404, 'Staff member not found');
+  if (req.user.role !== 'HOSPITAL_ADMIN' && staff.role === 'HOSPITAL_ADMIN') {
+    throw new HttpError(403, 'Only a hospital admin can delete another hospital admin');
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.user.update({ where: { id: staff.id }, data: { is_active: false, refresh_token: null } });
+    await tx.refreshSession.deleteMany({ where: { user_id: staff.id } });
+  });
+  emitToHospital(req.hospitalId, 'staff:refresh', { action: 'deleted', staff_id: staff.id });
+  res.json({ success: true, message: 'Staff access deleted' });
 });
 
 router.get('/roster', async (req, res) => {

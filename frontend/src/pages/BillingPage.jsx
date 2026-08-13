@@ -9,6 +9,7 @@ import Modal from '../components/common/Modal'
 import StatCard from '../components/common/StatCard'
 import { Badge, Spinner } from '../components/common/StatCard'
 import { fmt } from '../utils/helpers'
+import { printHtml } from '../utils/print'
 
 const emptyItem = { category: 'Consultation', description: '', quantity: 1, unit_price: 0 }
 const defaultBill = { type: 'OPD', payment_mode: 'CASH', auto_apply: true, collect_payment: false, payment_reference: '' }
@@ -203,17 +204,15 @@ export default function BillingPage() {
   }
 
   const printInvoice = (bill) => {
-    const win = window.open('', '_blank', 'width=900,height=800')
-    if (!win) return toast.error('Allow pop-ups to print the invoice')
     const rows = (bill.items || []).map((item, i) => `<tr><td>${i + 1}</td><td>${esc(item.category)}</td><td>${esc(item.description)}</td><td class="num">${esc(item.quantity)}</td><td class="num">${esc(fmt.currency(item.unit_price))}</td><td class="num">${esc(fmt.currency(item.total))}</td></tr>`).join('')
-    win.document.write(`<!doctype html><html><head><title>${esc(bill.bill_no)}</title><style>
+    const documentHtml = `<!doctype html><html><head><title>${esc(bill.bill_no)}</title><style>
       @page{size:A4;margin:12mm}*{box-sizing:border-box}body{font:12px Arial;color:#111;margin:0}h1{font-size:20px;margin:0}.head,.meta,.sign{display:flex;justify-content:space-between;gap:24px}.head{border-bottom:2px solid #111;padding-bottom:10px}.meta{margin:14px 0}.box{border:1px solid #bbb;padding:10px;flex:1}table{width:100%;border-collapse:collapse}th,td{border:1px solid #aaa;padding:7px;text-align:left}th{background:#eee}.num{text-align:right}.totals{width:310px;margin:14px 0 0 auto}.totals div{display:flex;justify-content:space-between;padding:3px}.grand{font-size:15px;font-weight:bold;border-top:2px solid #111}.sign{margin-top:70px}.line{border-top:1px solid #111;padding-top:6px;width:42%;text-align:center}.note{margin-top:18px;font-size:10px;color:#444}@media print{button{display:none}}</style></head><body>
       <div class="head"><div><h1>Hospital Tax Invoice / Receipt</h1><div>Original for recipient</div></div><div><b>${esc(bill.bill_no)}</b><br>${esc(fmt.datetime(bill.created_at))}</div></div>
       <div class="meta"><div class="box"><b>Patient</b><br>${esc(`${bill.patient?.first_name || ''} ${bill.patient?.last_name || ''}`.trim())}<br>UHID: ${esc(bill.patient?.uhid)}</div><div class="box"><b>Bill details</b><br>Type: ${esc(bill.type)}<br>Status: ${esc(bill.status)}<br>Payment: ${esc(bill.payment_mode || '-')}<br>Admission: ${esc(bill.admission_id || '-')}</div></div>
       <table><thead><tr><th>#</th><th>Category</th><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${rows}</tbody></table>
       <div class="totals"><div><span>Subtotal</span><b>${esc(fmt.currency(bill.subtotal))}</b></div><div><span>Discount</span><b>${esc(fmt.currency(bill.discount_amt))}</b></div><div><span>GST included / charged</span><b>${esc(fmt.currency(bill.tax_amt))}</b></div><div class="grand"><span>Invoice total</span><span>${esc(fmt.currency(bill.total_amt))}</span></div><div><span>Paid</span><b>${esc(fmt.currency(bill.paid_amt))}</b></div><div><span>Balance due</span><b>${esc(fmt.currency(bill.due_amt))}</b></div></div>
-      <div class="sign"><div class="line">Patient / payer signature</div><div class="line">Authorized signatory and hospital stamp</div></div><div class="note">Computer-generated invoice. Preserve this document with payment and clinical records for audit.</div><script>window.onload=()=>window.print()</script></body></html>`)
-    win.document.close()
+      <div class="sign"><div class="line">Patient / payer signature</div><div class="line">Authorized signatory and hospital stamp</div></div><div class="note">Computer-generated invoice. Preserve this document with payment and clinical records for audit.</div></body></html>`
+    printHtml(documentHtml, `Invoice ${bill.bill_no || ''}`).catch(() => toast.error('Could not open the print dialog'))
   }
 
   return (

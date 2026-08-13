@@ -1,7 +1,8 @@
 // src/utils/api.js
 import axios from 'axios'
+import { getServerOrigin } from './runtimeConfig'
 
-const resolveApiUrl = () => import.meta.env.VITE_API_URL || '/api'
+const resolveApiUrl = () => import.meta.env.VITE_API_URL || (getServerOrigin() ? `${getServerOrigin()}/api` : '/api')
 
 const resolveRefreshUrl = () => {
   const baseURL = resolveApiUrl()

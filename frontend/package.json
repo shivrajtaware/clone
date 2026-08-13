@@ -11,7 +11,10 @@
     "preview": "vite preview",
     "lint": "eslint src --ext .js,.jsx",
     "electron": "electron main.js",
-    "electron:build": "npm run build && electron-builder"
+    "electron:build": "npm run build && electron-builder",
+    "tauri": "tauri",
+    "tauri:dev": "npm run build && tauri dev",
+    "tauri:build": "npm run build && tauri build"
   },
   "dependencies": {
     "@headlessui/react": "^1.7.18",
@@ -33,6 +36,7 @@
     "zustand": "^4.5.1"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.5.0",
     "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.18",
     "electron": "^42.4.1",

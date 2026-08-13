@@ -751,8 +751,8 @@ model PharmacyItem {
   strength         String?
   unit             String
   pack_unit        String         @default("strip")
-  units_per_pack   Int            @default(1)
-  current_stock    Int            @default(0)
+  units_per_pack   Decimal        @default(1)
+  current_stock    Decimal        @default(0)
   min_stock_level  Int            @default(10)
   max_stock_level  Int            @default(1000)
   reorder_quantity Int            @default(100)
@@ -773,8 +773,8 @@ model DrugBatch {
   batch_no     String
   mfg_date     DateTime?
   expiry_date  DateTime
-  quantity_in  Int
-  quantity_rem Int
+  quantity_in  Decimal
+  quantity_rem Decimal
   mrp          Decimal
   selling_price Decimal?
   cost_price   Decimal?
@@ -810,7 +810,7 @@ model DispenseItem {
   id          String       @id @default(uuid())
   dispense_id String
   item_id     String
-  quantity    Int
+  quantity    Decimal
   batch_no    String?
   unit_price  Decimal?
   dispense    Dispense     @relation(fields: [dispense_id], references: [id])
@@ -902,7 +902,7 @@ model BillItem {
   bill_id     String
   category    String
   description String
-  quantity    Int     @default(1)
+  quantity    Decimal @default(1)
   unit_price  Decimal
   total       Decimal
   bill        Bill    @relation(fields: [bill_id], references: [id])

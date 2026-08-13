@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import toast from 'react-hot-toast'
-import { CalendarDays, ClipboardCheck, Clock, RotateCcw, Save, Search, ShieldCheck, Stethoscope, UserPlus, Users } from 'lucide-react'
+import { CalendarDays, ClipboardCheck, Clock, RotateCcw, Save, Search, ShieldCheck, Stethoscope, Trash2, UserPlus, Users } from 'lucide-react'
 import api from '../utils/api'
 import useAuthStore from '../context/authStore'
 import Modal from '../components/common/Modal'
@@ -36,6 +36,7 @@ export default function StaffPage() {
   const rosterQuery = useQuery({ queryKey: ['staff-roster'], queryFn: () => api.get('/staff/roster').then(r => r.data.data), refetchInterval: 60000 })
   const leavesQuery = useQuery({ queryKey: ['staff-leaves'], queryFn: () => api.get('/staff/leaves').then(r => r.data.data), refetchInterval: 60000 })
   const canManagePermissions = ['HOSPITAL_ADMIN', 'HR_MANAGER'].includes(user?.role)
+  const canManageStaff = ['HOSPITAL_ADMIN', 'HR_MANAGER'].includes(user?.role)
   const permissionsQuery = useQuery({
     queryKey: ['staff-module-permissions'],
     queryFn: () => api.get('/staff/module-permissions').then(r => r.data.data),
@@ -66,6 +67,11 @@ export default function StaffPage() {
     mutationFn: (d) => api.post('/staff', d),
     onSuccess: () => { toast.success('Staff member added'); refresh(); setShowStaffModal(false); staffForm.reset({ role: 'NURSE', is_active: true }) },
     onError: (e) => toast.error(e.response?.data?.message || 'Failed to add staff'),
+  })
+  const deleteStaffMut = useMutation({
+    mutationFn: (id) => api.delete(`/staff/${id}`),
+    onSuccess: () => { toast.success('Staff member deleted and access disabled'); refresh() },
+    onError: (e) => toast.error(e.response?.data?.message || 'Failed to delete staff member'),
   })
   const rosterMut = useMutation({
     mutationFn: (d) => api.post('/staff/roster', d),
@@ -101,8 +107,8 @@ export default function StaffPage() {
           <p className="page-sub">{staff.length} staff, {doctors.length} doctors, {pendingLeaves.length} pending leaves</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button className="btn-primary" onClick={() => setShowStaffModal(true)}><UserPlus size={16} /> Add Staff</button>
-          <button className="btn" onClick={() => setShowRosterModal(true)}><CalendarDays size={16} /> Assign Shift</button>
+          {canManageStaff && <button className="btn-primary" onClick={() => setShowStaffModal(true)}><UserPlus size={16} /> Add Staff</button>}
+          {canManageStaff && <button className="btn" onClick={() => setShowRosterModal(true)}><CalendarDays size={16} /> Assign Shift</button>}
           <button className="btn" onClick={() => setShowLeaveModal(true)}><Clock size={16} /> Leave</button>
         </div>
       </div>
@@ -133,7 +139,9 @@ export default function StaffPage() {
 
           {staffQuery.isLoading ? <div className="flex justify-center py-20"><Spinner size="lg" /></div> : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {staff.map(s => <StaffCard key={s.id} staff={s} />)}
+              {staff.map(s => <StaffCard key={s.id} staff={s} canDelete={canManageStaff && s.id !== user?.id} deleting={deleteStaffMut.isPending} onDelete={() => {
+                if (window.confirm(`Delete ${s.first_name} ${s.last_name}? Their access will be disabled while clinical records are retained.`)) deleteStaffMut.mutate(s.id)
+              }} />)}
               {!staff.length && <div className="card text-xs text-slate-400">No staff found.</div>}
             </div>
           )}
@@ -262,7 +270,7 @@ function PermissionsPanel({ data, loading, drafts, setDrafts, mutate }) {
   )
 }
 
-function StaffCard({ staff }) {
+function StaffCard({ staff, canDelete, deleting, onDelete }) {
   return (
     <div className="card-hover">
       <div className="flex items-start gap-3 mb-3">
@@ -275,6 +283,7 @@ function StaffCard({ staff }) {
       </div>
       <div className="flex gap-1 flex-wrap mb-2"><Badge status={staff.is_active ? 'ACTIVE' : 'INACTIVE'} /><span className="badge-blue text-[10px]">{ROLE_LABELS[staff.role]}</span>{staff.doctor_profile?.specialization && <span className="badge-purple text-[10px]">{staff.doctor_profile.specialization}</span>}</div>
       {staff.role === 'DOCTOR' && staff.doctor_profile && <div className="mt-2 grid grid-cols-2 gap-2 text-xs bg-navy-800 rounded-lg px-2.5 py-2"><span className="text-slate-400">Fee <strong className="text-white">{fmt.currency(staff.doctor_profile.consultation_fee)}</strong></span><span className="text-slate-400">Exp <strong className="text-white">{staff.doctor_profile.experience_years || 0}y</strong></span></div>}
+      {canDelete && <button type="button" className="btn mt-3 w-full text-xs text-brand-red" disabled={deleting} onClick={onDelete}><Trash2 size={14} /> {deleting ? 'Deleting...' : 'Delete staff'}</button>}
     </div>
   )
 }

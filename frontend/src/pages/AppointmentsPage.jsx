@@ -12,6 +12,7 @@ import { Badge, Spinner, EmptyState } from '../components/common/StatCard'
 import StatCard from '../components/common/StatCard'
 import { fmt } from '../utils/helpers'
 import { DRUG_ROUTES, inferredLooseUnit, inferredPackUnit, packSize } from '../utils/drugForms'
+import { getSocketUrl } from '../utils/runtimeConfig'
 
 const VISIT_TYPES = ['REGULAR', 'FOLLOW_UP', 'TELECONSULT', 'HOME_VISIT', 'EMERGENCY']
 const STATUS_OPTIONS = ['BOOKED', 'CONFIRMED', 'CHECKED_IN', 'IN_CONSULTATION', 'COMPLETED', 'NO_SHOW', 'CANCELLED']
@@ -58,12 +59,12 @@ const stripClientFields = (item) => {
 const emptyRxItem = { drug_name: '', generic_name: '', item_id: '', strength: '', form: '', dose: '', frequency: 'BD', route: 'Oral', duration: '', quantity: 1, quantity_unit: 'LOOSE', issue_mode: 'AUTO', pack_quantity: 1, instructions: '', unit: '', pack_unit: 'container', units_per_pack: 1 }
 
 const resolveSocketUrl = () => {
-  const configured = import.meta.env.VITE_SOCKET_URL?.trim()
+  const configured = getSocketUrl()
   if (configured) return configured
 
   if (typeof window === 'undefined') return 'http://localhost:5000'
 
-  const apiBase = import.meta.env.VITE_API_URL || '/api'
+  const apiBase = import.meta.env.VITE_API_URL || `${getSocketUrl()}/api`
   if (/^https?:\/\//i.test(apiBase)) {
     try {
       const parsed = new URL(apiBase)
@@ -101,6 +102,7 @@ export default function AppointmentsPage() {
   const [statusFilter, setStatusFilter] = useState('')
   const [doctorFilter, setDoctorFilter] = useState('')
   const [patientSuggestOpen, setPatientSuggestOpen] = useState(false)
+  const [patientInput, setPatientInput] = useState('')
   const [opdAppointment, setOpdAppointment] = useState(null)
   const [opdStackId, setOpdStackId] = useState('')
   const [opdMedicines, setOpdMedicines] = useState([newMedicine()])
@@ -168,7 +170,7 @@ export default function AppointmentsPage() {
   })
   const labTests = []
 
-  const patientSearch = watch('patient_id') || ''
+  const patientSearch = patientInput
 
   const { data: patientSuggestions, isFetching: patientsFetching } = useQuery({
     queryKey: ['patient-search', patientSearch],
@@ -655,17 +657,10 @@ export default function AppointmentsPage() {
         <form onSubmit={handleSubmit(d => createMut.mutate(d))} className="space-y-4">
           <div className="relative">
             <label className="label">Patient UHID, Name, or Phone *</label>
-            <input
-              className="input"
-              placeholder="Start typing patient name..."
-              autoComplete="off"
-              {...register('patient_id', {
-                required: true,
-                onChange: () => setPatientSuggestOpen(true),
-                onBlur: () => setTimeout(() => setPatientSuggestOpen(false), 150),
-              })}
-              onFocus={() => setPatientSuggestOpen(true)}
-            />
+            <input className="input" placeholder="Start typing patient name..." autoComplete="off" value={patientInput}
+              onChange={e => { setPatientInput(e.target.value); setValue('patient_id', '', { shouldValidate: true }); setPatientSuggestOpen(true) }}
+              onBlur={() => setTimeout(() => setPatientSuggestOpen(false), 150)} onFocus={() => setPatientSuggestOpen(true)} />
+            <input type="hidden" {...register('patient_id', { required: true })} />
             {patientSuggestOpen && patientSearch.trim().length >= 2 && (
               <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-lg border border-default bg-navy-700 shadow-2xl">
                 {patientsFetching && <div className="px-3 py-2 text-xs text-slate-400">Searching patients...</div>}
@@ -676,6 +671,7 @@ export default function AppointmentsPage() {
                     className="w-full px-3 py-2 text-left hover:bg-navy-600 transition-colors"
                     onMouseDown={() => {
                       setValue('patient_id', patient.uhid, { shouldValidate: true, shouldDirty: true })
+                      setPatientInput(`${patient.first_name} ${patient.last_name} — ${patient.uhid}`)
                       setPatientSuggestOpen(false)
                     }}
                   >
@@ -788,7 +784,10 @@ function MedicineSuggestInput({ item, onChange }) {
               <div className="text-[11px] text-slate-400">{medicine.generic_name} | {medicine.form} {medicine.strength || ''} | Stock {medicine.stock_display || `${medicine.current_stock} ${medicine.unit}`} | {medicine.pack_size_label}</div>
             </button>
           ))}
-          {!suggestions.isLoading && !rows.length && <div className="px-3 py-2 text-xs text-slate-400">No matching pharmacy stock found.</div>}
+          {!suggestions.isLoading && !rows.length && <button type="button" className="block w-full px-3 py-2 text-left hover:bg-navy-800" onMouseDown={() => { onChange({ drug_name: query, item_id: '', generic_name: '' }); setOpen(false) }}>
+            <div className="text-xs font-semibold text-cyan">Use “{query}” as prescribed medicine</div>
+            <div className="text-[11px] text-slate-400">Not in inventory now — pharmacy can enter price and GST during billing.</div>
+          </button>}
         </div>
       )}
     </div>

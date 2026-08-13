@@ -6,6 +6,7 @@ import { Link } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
+import { getSocketUrl } from '../utils/runtimeConfig'
 import Modal from '../components/common/Modal'
 import BarcodeModal from '../components/patients/BarcodeModal'
 import { Badge, Spinner, EmptyState, Pagination } from '../components/common/StatCard'
@@ -40,7 +41,7 @@ export default function PatientsPage() {
   const qc = useQueryClient()
   
   useEffect(() => {
-    const socket = io({ auth: { token: localStorage.getItem('token') } })
+    const socket = io(getSocketUrl(), { auth: { token: localStorage.getItem('token') } })
     socket.emit('join:patients')
     socket.on('patients:updated', () => {
       qc.invalidateQueries({ queryKey: ['patients'] })
