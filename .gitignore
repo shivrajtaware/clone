@@ -8,3 +8,10 @@ uploads/
 .DS_Store
 *.pem
 .prisma/
+
+# Local deployment data and credentials
+backups/pharmacy/*.json
+backend/uploads/
+backend/logs/
+frontend/.env.local
+frontend/src-tauri/target/

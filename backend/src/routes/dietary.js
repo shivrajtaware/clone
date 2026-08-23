@@ -24,7 +24,9 @@ router.patch('/orders/:id', async (req, res) => {
     exclude: ['id', 'patient_id', 'ordered_by', 'created_at'],
   });
   if (req.body.patient_id) data.patient_id = await resolvePatientId(prisma, req.hospitalId, req.body.patient_id);
-  const o = await prisma.dietOrder.update({ where: { id: req.params.id }, data });
+  const existing = await prisma.dietOrder.findFirst({ where: { id: req.params.id, patient: { hospital_id: req.hospitalId } }, select: { id: true } });
+  if (!existing) return res.status(404).json({ success: false, message: 'Diet order not found' });
+  const o = await prisma.dietOrder.update({ where: { id: existing.id }, data });
   res.json({ success: true, data: o });
 });
 module.exports = router;

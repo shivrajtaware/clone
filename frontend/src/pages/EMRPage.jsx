@@ -8,7 +8,7 @@ import api from '../utils/api'
 import Modal from '../components/common/Modal'
 import { Badge, Spinner } from '../components/common/StatCard'
 import { fmt, BG_DISPLAY } from '../utils/helpers'
-import { DRUG_ROUTES, inferredLooseUnit, inferredPackUnit, packSize } from '../utils/drugForms'
+import { DRUG_ROUTES, inferredLooseUnit, inferredPackUnit, packSize, normalizedDrugForm } from '../utils/drugForms'
 
 const TABS = ['vitals','notes','prescriptions','lab','allergies','history']
 const emptyLabOrder = { tests: [], is_stat: false, priority: 'ROUTINE', clinical_indication: '', specimen_notes: '' }
@@ -37,13 +37,66 @@ const issueQtyLabel = (item) => {
   const label = item.quantity_unit === 'PACK' ? inferredPackUnit(item) : inferredLooseUnit(item)
   return `${item.quantity} ${label}`
 }
-const effectiveQty = (item) => {
-  if (item.issue_mode === 'PACK') return Math.max(1, Number.parseInt(item.pack_quantity || 1, 10))
-  return calculatedQty(item)
+const LIQUID_FORMS = new Set(['syrup', 'suspension', 'drops'])
+const PACKAGE_ONLY_FORMS = new Set(['syrup', 'suspension', 'drops', 'injection', 'ampoule', 'vial', 'infusion', 'iv', 'iv fluid', 'inhaler', 'nebule', 'ointment', 'cream', 'gel', 'lotion', 'suppository', 'patch', 'spray', 'bottle'])
+const isPackageOnly = (item) => PACKAGE_ONLY_FORMS.has(normalizedDrugForm(item.form))
+const issueOptions = (item) => {
+  const form = normalizedDrugForm(item.form)
+  if (isPackageOnly(item)) return [{ value: 'PACK', label: inferredPackUnit(item) }]
+  if (['tablet', 'capsule'].includes(form) && packSize(item) > 1) {
+    return [
+      { value: 'PACK', label: `${inferredPackUnit(item)} (recommended)` },
+      { value: 'LOOSE', label: inferredLooseUnit(item) },
+    ]
+  }
+  return [{ value: 'LOOSE', label: inferredLooseUnit(item) }]
 }
+const issueMode = (item) => {
+  const options = issueOptions(item)
+  return options.some(option => option.value === item.quantity_unit) ? item.quantity_unit : options[0].value
+}
+const suggestedIssueQuantity = (item, mode = issueMode(item)) => {
+  const requiredLooseUnits = calculatedQty(item)
+  if (mode !== 'PACK') return requiredLooseUnits
+  const size = Math.max(1, Number(packSize(item) || 1))
+  return size > 1 ? Math.max(1, Math.ceil(requiredLooseUnits / size)) : 1
+}
+const issuePlan = (item) => {
+  const mode = issueMode(item)
+  const suggested = suggestedIssueQuantity(item, mode)
+  const quantity = Number(item.quantity) > 0 ? Number(item.quantity) : suggested
+  return { mode, quantity, suggested, requiredLooseUnits: calculatedQty(item), size: packSize(item) }
+}
+const routeOptionsFor = (item) => {
+  const form = normalizedDrugForm(item.form)
+  if (['injection', 'ampoule', 'vial'].includes(form)) return ['IM', 'IV', 'SC']
+  if (['infusion', 'iv'].includes(form)) return ['IV']
+  if (form === 'inhaler') return ['Inhaled']
+  if (form === 'nebule') return ['Nebulized']
+  if (['cream', 'ointment', 'gel', 'lotion', 'patch', 'spray'].includes(form)) return ['Topical']
+  if (form === 'suppository') return ['Rectal']
+  if (form === 'drops') return ['Oral', 'Ophthalmic', 'Otic', 'Nasal']
+  return ['Oral']
+}
+const routeFor = (item) => routeOptionsFor(item).includes(item.route) ? item.route : routeOptionsFor(item)[0]
+const doseProfile = (item) => {
+  const form = normalizedDrugForm(item.form)
+  if (form === 'tablet') return { unit: 'tablet', choices: [0.5, 1, 2] }
+  if (form === 'capsule') return { unit: 'capsule', choices: [1, 2] }
+  if (['syrup', 'suspension'].includes(form)) return { unit: 'ml', choices: [2.5, 5, 10] }
+  if (form === 'drops') return { unit: 'drop', choices: [1, 2, 3] }
+  if (['injection', 'ampoule', 'vial'].includes(form)) return { unit: form === 'ampoule' || String(item.unit || '').toLowerCase().includes('ampoule') ? 'ampoule' : 'vial', choices: [1, 2] }
+  if (['cream', 'ointment', 'gel', 'lotion'].includes(form)) return { unit: 'application', choices: [1, 2] }
+  if (form === 'inhaler') return { unit: 'puff', choices: [1, 2] }
+  if (form === 'nebule') return { unit: 'nebule', choices: [1, 2] }
+  return { unit: inferredLooseUnit(item), choices: [1, 2] }
+}
+const doseText = (amount, unit) => `${amount} ${unit === 'ml' || Number(amount) === 1 ? unit : `${unit}s`}`
+const doseAmount = (dose = '') => String(dose).match(/\d+(?:\.\d+)?/)?.[0] || ''
 const stripClientFields = (item) => {
-  const { issue_mode, pack_quantity, unit, pack_unit, units_per_pack, ...payload } = item
-  return { ...payload, quantity: effectiveQty(item), quantity_unit: issue_mode === 'PACK' ? 'PACK' : 'LOOSE' }
+  const { issue_mode, pack_quantity, unit, pack_unit, units_per_pack, _quantityManual, ...payload } = item
+  const plan = issuePlan(item)
+  return { ...payload, quantity: plan.quantity, quantity_unit: plan.mode }
 }
 
 export default function EMRPage() {
@@ -174,16 +227,46 @@ export default function EMRPage() {
     setRxItems(prev => prev.map((row, i) => {
       if (i !== idx) return row
       const next = { ...row, ...updates }
+      if (Object.prototype.hasOwnProperty.call(updates, 'quantity')) next._quantityManual = true
+      if (Object.prototype.hasOwnProperty.call(updates, 'quantity_unit')) {
+        next.quantity_unit = issueMode(next)
+        next.quantity = suggestedIssueQuantity(next, next.quantity_unit)
+        next._quantityManual = false
+      }
+      if (Object.prototype.hasOwnProperty.call(updates, 'item_id') && updates.item_id) {
+        next.route = routeFor(next)
+        next.quantity_unit = issueMode(next)
+        next.quantity = suggestedIssueQuantity(next, next.quantity_unit)
+        next._quantityManual = false
+      }
       if (['dose', 'frequency', 'duration'].some(key => Object.prototype.hasOwnProperty.call(updates, key))) {
-        next.quantity = calculatedQty(next)
+        next.quantity = suggestedIssueQuantity(next)
+        next._quantityManual = false
       }
       if (Object.prototype.hasOwnProperty.call(updates, 'drug_name') && !updates.item_id) {
         next.units_per_pack = 1
         next.pack_unit = ''
         next.unit = ''
+        next.quantity_unit = 'LOOSE'
+        next.quantity = 1
+        next._quantityManual = false
       }
       return next
     }))
+  }
+
+  const useLastPrescription = () => {
+    const latest = rxs[0]
+    if (!latest?.items?.length) return toast.error('No previous prescription is available')
+    setRxItems(latest.items.map(item => ({
+      ...emptyRxItem,
+      ...item,
+      item_id: item.pharmacy_item_id || '',
+      issue_mode: 'AUTO',
+      quantity: item.quantity || 1,
+      _quantityManual: true,
+    })))
+    toast.success('Previous prescription copied — review before saving')
   }
 
   return (
@@ -216,6 +299,7 @@ export default function EMRPage() {
         <span className="text-xs font-semibold text-slate-300">Record under</span>
         <select className="select max-w-40" value={encounterType} onChange={e => setEncounterType(e.target.value)}>
           <option value="OPD">OPD visit</option>
+          <option value="TELEMEDICINE">Telemedicine</option>
           <option value="IPD">IPD admission</option>
         </select>
       </div>
@@ -448,60 +532,26 @@ export default function EMRPage() {
 
       <Modal open={showRxModal} onClose={() => setShowRxModal(false)} title="New Prescription" size="xl">
         <div className="space-y-3">
+          {rxs[0]?.items?.length > 0 && (
+            <button type="button" className="btn w-full text-xs border-cyan/40 text-cyan" onClick={useLastPrescription}>
+              ↻ Copy last prescription ({rxs[0].items.length} medicine{rxs[0].items.length === 1 ? '' : 's'})
+            </button>
+          )}
           {rxItems.map((item, idx) => (
             <div key={idx} className="rounded-lg border border-default bg-navy-800 p-3">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
                   <div className="text-xs font-semibold text-white">Medicine {idx + 1}</div>
-                  <div className="text-[11px] text-slate-400">Choose auto dose quantity or direct container issue.</div>
+                  <div className="text-[11px] text-slate-400">Select the medicine, enter the regimen, then review the suggested issue quantity.</div>
                 </div>
                 {rxItems.length > 1 && <button type="button" className="btn text-xs text-brand-red px-2 py-1" onClick={() => setRxItems(prev => prev.filter((_,i) => i!==idx))}>Remove</button>}
               </div>
+              <div className="mb-2">
+                <label className="label">Medicine *</label>
+                <MedicineSuggestInput item={item} onChange={(updates) => updateRxItem(idx, updates)} />
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
-                <div className="md:col-span-7">
-                  <label className="label">Drug Name *</label>
-                  <MedicineSuggestInput
-                    item={item}
-                    onChange={(updates) => updateRxItem(idx, updates)}
-                  />
-                </div>
-                <div className="md:col-span-5"><label className="label">Strength</label><input className="input" placeholder="e.g. 500mg" value={item.strength||''} onChange={e => setRxItems(prev => prev.map((r,i) => i===idx ? {...r, strength: e.target.value} : r))} /></div>
-                <div className="md:col-span-3"><label className="label">Dose</label><input className="input" placeholder="e.g. 1 tablet / 5 ml / 1 vial" value={item.dose} onChange={e => updateRxItem(idx, { dose: e.target.value })} /></div>
-                <div className="md:col-span-3"><label className="label">Frequency</label>
-                  <select className="select" value={item.frequency} onChange={e => updateRxItem(idx, { frequency: e.target.value })}>
-                    {['OD','BD','TDS','QID','SOS','Nocte','Stat'].map(f => <option key={f}>{f}</option>)}
-                  </select>
-                </div>
-                <div className="md:col-span-3"><label className="label">Route</label>
-                  <select className="select" value={item.route} onChange={e => setRxItems(prev => prev.map((r,i) => i===idx ? {...r, route: e.target.value} : r))}>
-                    {DRUG_ROUTES.map(r => <option key={r}>{r}</option>)}
-                  </select>
-                </div>
-                <div className="md:col-span-3"><label className="label">Duration</label><input className="input" placeholder="e.g. 5 days" value={item.duration} onChange={e => updateRxItem(idx, { duration: e.target.value })} /></div>
-                <div className="md:col-span-4">
-                  <label className="label">Issue Option</label>
-                  <select className="select" value={item.issue_mode || 'AUTO'} onChange={e => updateRxItem(idx, { issue_mode: e.target.value })}>
-                    <option value="AUTO">Auto from dosage</option>
-                    <option value="PACK">Container/pack</option>
-                  </select>
-                  <div className="mt-1 text-[11px] text-slate-400">
-                    {packSize(item) > 1 ? `1 ${inferredPackUnit(item)} = ${packSize(item)} ${inferredLooseUnit(item)}` : 'Pharmacy will use inventory container size during billing'}
-                  </div>
-                </div>
-                <div className="md:col-span-4">
-                  <label className="label">{item.issue_mode === 'PACK' ? `${inferredPackUnit(item)} Qty` : 'Dispense Qty'}</label>
-                  {item.issue_mode === 'PACK' ? (
-                    <>
-                      <input type="number" min="1" className="input" value={item.pack_quantity || 1} onChange={e => updateRxItem(idx, { pack_quantity: e.target.value })} />
-                      <div className="mt-1 text-[11px] text-cyan">
-                        {packSize(item) > 1 ? `${Number.parseInt(item.pack_quantity || 1, 10) * packSize(item)} ${inferredLooseUnit(item)} total` : 'Total units will be resolved in pharmacy'}
-                      </div>
-                    </>
-                  ) : (
-                    <input className="input" placeholder="Auto" value={effectiveQty(item)} readOnly />
-                  )}
-                </div>
-                <div className="md:col-span-4"><label className="label">Instructions</label><input className="input" placeholder="e.g. After food" value={item.instructions||''} onChange={e => setRxItems(prev => prev.map((r,i) => i===idx ? {...r, instructions: e.target.value} : r))} /></div>
+                <div className="md:col-span-12"><ClinicalPrescriptionControls item={item} onChange={(updates) => updateRxItem(idx, updates)} /></div>
               </div>
               {item.item_id && <div className="mt-2 text-[11px] text-cyan">Linked to pharmacy stock: {item.generic_name || item.drug_name}{item.form ? ` | ${item.form}` : ''}</div>}
             </div>
@@ -637,13 +687,14 @@ function MedicineSuggestInput({ item, onChange }) {
   const suggestions = useQuery({
     queryKey: ['pharmacy-medicine-suggestions', query],
     queryFn: () => api.get('/pharmacy/medicine-suggestions', { params: { search: query } }).then(r => r.data.data),
-    enabled: query.length >= 2,
+    enabled: open,
     staleTime: 30000,
   })
   const rows = suggestions.data || []
 
   const selectMedicine = (medicine) => {
     const displayName = [medicine.brand_name, medicine.generic_name].filter(Boolean).join(' / ') || medicine.generic_name
+    const form = String(medicine.form || '').toLowerCase()
     onChange({
       item_id: medicine.id,
       drug_name: displayName,
@@ -653,6 +704,7 @@ function MedicineSuggestInput({ item, onChange }) {
       unit: medicine.unit || '',
       pack_unit: medicine.pack_unit || 'container',
       units_per_pack: medicine.units_per_pack || 1,
+      dose: item.dose || '',
     })
     setOpen(false)
   }
@@ -669,21 +721,59 @@ function MedicineSuggestInput({ item, onChange }) {
           setOpen(true)
         }}
       />
-      {open && query.length >= 2 && (
+      {open && (
         <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-lg border border-default bg-navy-900 shadow-xl">
-          {suggestions.isLoading && <div className="px-3 py-2 text-xs text-slate-400">Searching pharmacy stock...</div>}
+          {suggestions.isLoading && <div className="px-3 py-2 text-xs text-slate-400">{query.length >= 2 ? 'Searching pharmacy stock...' : 'Choose an available medicine...'}</div>}
           {!suggestions.isLoading && rows.map(medicine => (
             <button key={medicine.id} type="button" className="block w-full border-b border-default px-3 py-2 text-left last:border-b-0 hover:bg-navy-800" onMouseDown={() => selectMedicine(medicine)}>
               <div className="text-xs font-semibold text-white">{medicine.brand_name || medicine.generic_name}</div>
               <div className="text-[11px] text-slate-400">{medicine.generic_name} | {medicine.form} {medicine.strength || ''} | Stock {medicine.stock_display || `${medicine.current_stock} ${medicine.unit}`} | {medicine.pack_size_label}</div>
             </button>
           ))}
-          {!suggestions.isLoading && !rows.length && <button type="button" className="block w-full px-3 py-2 text-left hover:bg-navy-800" onMouseDown={() => { onChange({ drug_name: query, item_id: '', generic_name: '' }); setOpen(false) }}>
+          {!suggestions.isLoading && !rows.length && query.length >= 2 && <button type="button" className="block w-full px-3 py-2 text-left hover:bg-navy-800" onMouseDown={() => { onChange({ drug_name: query, item_id: '', generic_name: '' }); setOpen(false) }}>
             <div className="text-xs font-semibold text-cyan">Use “{query}” as prescribed medicine</div>
             <div className="text-[11px] text-slate-400">Not in inventory now — pharmacy can enter price and GST during billing.</div>
           </button>}
         </div>
       )}
+    </div>
+  )
+}
+
+function ClinicalPrescriptionControls({ item, onChange }) {
+  const profile = doseProfile(item)
+  const routes = routeOptionsFor(item)
+  const regimenComplete = Boolean(item.dose && item.frequency && item.duration)
+  const plan = issuePlan(item)
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+        {item.strength && <span className="rounded bg-navy-700 px-2 py-1 text-slate-200">{item.strength}</span>}
+        {item.form && <span className="rounded bg-navy-700 px-2 py-1 text-slate-200">{item.form}</span>}
+        {routes.length > 1 ? <label className="flex items-center gap-1">Route <select className="select w-auto py-1 text-xs" value={routeFor(item)} onChange={e => onChange({ route: e.target.value })}>{routes.map(route => <option key={route}>{route}</option>)}</select></label> : <span>Route: <b className="text-slate-200">{routeFor(item)}</b></span>}
+        <span className="text-cyan">{regimenComplete ? `Dispense: ${plan.suggested} ${plan.mode === 'PACK' ? inferredPackUnit(item) : inferredLooseUnit(item)}` : 'Quantity will calculate after dose and duration.'}</span>
+      </div>
+      <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+        <div>
+          <label className="label">Dose ({profile.unit})</label>
+          <div className="flex gap-1">
+            {profile.choices.map(amount => <button key={amount} type="button" className={`btn flex-1 px-2 py-1 text-xs ${item.dose === doseText(amount, profile.unit) ? 'border-cyan text-cyan' : ''}`} onClick={() => onChange({ dose: doseText(amount, profile.unit) })}>{amount}</button>)}
+            <input className="input w-16 px-2 py-1 text-xs" type="number" min="0" step="0.5" placeholder="Other" value={doseAmount(item.dose)} onChange={e => onChange({ dose: e.target.value ? doseText(e.target.value, profile.unit) : '' })} />
+          </div>
+        </div>
+        <div>
+          <label className="label">Frequency</label>
+          <div className="flex gap-1">{[['OD','OD'], ['BD','BD'], ['TDS','TDS'], ['QID','QID'], ['SOS','SOS/PRN']].map(([value, label]) => <button key={value} type="button" className={`btn flex-1 px-1 py-1 text-[11px] ${item.frequency === value ? 'border-cyan text-cyan' : ''}`} onClick={() => onChange({ frequency: value })}>{label}</button>)}</div>
+        </div>
+        <div>
+          <label className="label">Duration</label>
+          <div className="flex gap-1">{[3, 5, 7, 10].map(days => <button key={days} type="button" className={`btn flex-1 px-1 py-1 text-xs ${item.duration === `${days} days` ? 'border-cyan text-cyan' : ''}`} onClick={() => onChange({ duration: `${days} days` })}>{days}d</button>)}</div>
+        </div>
+        <div>
+          <label className="label">Instructions</label>
+          <div className="flex gap-1">{[['Before food','BF'], ['After food','AF'], ['At bedtime','Bedtime'], ['As needed','PRN']].map(([value, label]) => <button key={value} type="button" className={`btn flex-1 px-1 py-1 text-[11px] ${item.instructions === value ? 'border-cyan text-cyan' : ''}`} onClick={() => onChange({ instructions: value })}>{label}</button>)}</div>
+        </div>
+      </div>
     </div>
   )
 }

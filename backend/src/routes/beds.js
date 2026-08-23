@@ -269,8 +269,8 @@ router.post('/admit', async (req, res) => {
 router.post('/discharge', async (req, res) => {
   try {
     const { admission_id, final_diagnosis, condition_at_discharge, follow_up_date, follow_up_instructions, diet_advice, activity_advice, auto_bill = true } = req.body;
-    const admission = await prisma.admission.findUnique({ 
-      where: { id: admission_id }, 
+    const admission = await prisma.admission.findFirst({
+      where: { id: admission_id, hospital_id: req.hospitalId },
       include: { bed: true, patient: true } 
     });
     if (!admission) return res.status(404).json({ success: false, message: 'Admission not found' });

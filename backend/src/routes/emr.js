@@ -4,8 +4,14 @@ const auth = require('../middleware/auth');
 const { prisma } = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 const { HttpError, resolvePatientId, sanitizeModelInput, splitCsv, toDate, toInt } = require('../utils/prismaInput');
+const { requirePatient } = require('../middleware/recordAuthorization');
 
 router.use(auth);
+
+const verifyPatientAccess = async (req) => {
+  const patient = await requirePatient(req, req.params.patientId);
+  return patient.id;
+};
 
 const normalizeIssueQuantity = (value) => {
   if (value === undefined || value === null || value === '') return null;
@@ -49,19 +55,20 @@ const calculatePrescriptionQuantity = (row) => Math.max(1, Math.ceil(
 ));
 
 const resolveEncounter = async (patientId, hospitalId, requestedType) => {
-  const encounter_type = String(requestedType || 'OPD').toUpperCase() === 'IPD' ? 'IPD' : 'OPD';
+  const requested = String(requestedType || 'OPD').toUpperCase();
+  const encounter_type = requested === 'IPD' ? 'IPD' : requested === 'TELEMEDICINE' ? 'TELEMEDICINE' : 'OPD';
   if (encounter_type === 'IPD') {
     const admission = await prisma.admission.findFirst({ where: { patient_id: patientId, hospital_id: hospitalId, status: 'ADMITTED' }, orderBy: { admission_date: 'desc' }, select: { id: true } });
     if (!admission) throw new HttpError(400, 'No active IPD admission for this patient');
     return { encounter_type, admission_id: admission.id, appointment_id: null };
   }
-  const appointment = await prisma.appointment.findFirst({ where: { patient_id: patientId, hospital_id: hospitalId, status: { notIn: ['CANCELLED', 'NO_SHOW'] } }, orderBy: { appointment_date: 'desc' }, select: { id: true } });
+  const appointment = await prisma.appointment.findFirst({ where: { patient_id: patientId, hospital_id: hospitalId, type: encounter_type === 'TELEMEDICINE' ? 'TELECONSULT' : undefined, status: { notIn: ['CANCELLED', 'NO_SHOW'] } }, orderBy: { appointment_date: 'desc' }, select: { id: true } });
   return { encounter_type, appointment_id: appointment?.id || null, admission_id: null };
 };
 
 // Get full EMR for a patient
 router.get('/:patientId', async (req, res) => {
-  const patientId = await resolvePatientId(prisma, req.hospitalId, req.params.patientId);
+  const patientId = await verifyPatientAccess(req);
   const [notes, vitals, prescriptions, allergies, labOrders, radiologyOrders, admissions] = await Promise.all([
     prisma.eMRNote.findMany({ where: { patient_id: patientId }, orderBy: { visit_date: 'desc' }, include: { doctor: { select: { first_name: true, last_name: true, designation: true, role: true } } } }),
     prisma.vitals.findMany({ where: { patient_id: patientId }, orderBy: { recorded_at: 'desc' }, take: 20, include: { recorded_by_user: { select: { first_name: true, last_name: true, role: true } } } }),
@@ -76,7 +83,7 @@ router.get('/:patientId', async (req, res) => {
 
 // Add SOAP note
 router.post('/:patientId/notes', async (req, res) => {
-  const patientId = await resolvePatientId(prisma, req.hospitalId, req.params.patientId);
+  const patientId = await verifyPatientAccess(req);
   const encounter = await resolveEncounter(patientId, req.hospitalId, req.body.encounter_type);
   const data = sanitizeModelInput('EMRNote', req.body, {
     exclude: ['id', 'patient_id', 'doctor_id', 'visit_date', 'created_at'],
@@ -97,7 +104,7 @@ router.post('/:patientId/notes', async (req, res) => {
 });
 
 router.post('/:patientId/external-lab-tests', async (req, res) => {
-  const patientId = await resolvePatientId(prisma, req.hospitalId, req.params.patientId);
+  const patientId = await verifyPatientAccess(req);
   const tests = Array.isArray(req.body.tests) ? req.body.tests.map(String).map(v => v.trim()).filter(Boolean) : [];
   if (!tests.length) throw new HttpError(400, 'Add at least one lab test');
   const count = await prisma.labOrder.count({ where: { hospital_id: req.hospitalId } });
@@ -112,7 +119,7 @@ router.post('/:patientId/external-lab-tests', async (req, res) => {
 
 // Record vitals
 router.post('/:patientId/vitals', async (req, res) => {
-  const patientId = await resolvePatientId(prisma, req.hospitalId, req.params.patientId);
+  const patientId = await verifyPatientAccess(req);
   const encounter = await resolveEncounter(patientId, req.hospitalId, req.body.encounter_type);
   const { temperature, pulse, bp_systolic, bp_diastolic, spo2, respiratory_rate, weight, height, blood_glucose, pain_score, gcs, notes } = req.body;
 
@@ -164,7 +171,7 @@ router.post('/:patientId/vitals', async (req, res) => {
 
 // Add prescription
 router.post('/:patientId/prescriptions', async (req, res) => {
-  const patientId = await resolvePatientId(prisma, req.hospitalId, req.params.patientId);
+  const patientId = await verifyPatientAccess(req);
   const encounter = await resolveEncounter(patientId, req.hospitalId, req.body.encounter_type);
   const { items, notes, valid_till } = req.body;
   const rows = Array.isArray(items) ? items : [];
@@ -199,6 +206,7 @@ router.post('/:patientId/prescriptions', async (req, res) => {
       data: {
         id: uuidv4(), patient_id: patientId, doctor_id: req.user.id,
         ...encounter,
+        fulfillment_mode: String(req.body.fulfillment_mode || 'HOSPITAL_PHARMACY').toUpperCase() === 'PRESCRIPTION_ONLY' ? 'PRESCRIPTION_ONLY' : 'HOSPITAL_PHARMACY',
         notes, valid_till: valid_till ? toDate(valid_till, 'valid_till') : null,
         items: { create: preparedItems.map(item => ({ id: uuidv4(), ...item })) },
       },
@@ -211,7 +219,7 @@ router.post('/:patientId/prescriptions', async (req, res) => {
 
 // Add allergy
 router.post('/:patientId/allergies', async (req, res) => {
-  const patientId = await resolvePatientId(prisma, req.hospitalId, req.params.patientId);
+  const patientId = await verifyPatientAccess(req);
   const data = sanitizeModelInput('PatientAllergy', req.body, {
     exclude: ['id', 'patient_id', 'noted_at'],
   });

@@ -281,11 +281,16 @@ router.patch('/orders/:id/status', async (req, res) => {
 router.patch('/orders/:id/results', async (req, res) => {
   const { results } = req.body; 
   if (!Array.isArray(results) || !results.length) badRequest('Add at least one result before saving');
+  const order = await prisma.labOrder.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId }, select: { id: true } });
+  if (!order) return res.status(404).json({ success: false, message: 'Lab order not found' });
+  const itemIds = results.map(result => result.item_id).filter(Boolean);
+  const items = await prisma.labOrderItem.findMany({ where: { id: { in: itemIds }, order_id: order.id }, select: { id: true } });
+  if (items.length !== itemIds.length) return res.status(404).json({ success: false, message: 'One or more lab result items do not belong to this order' });
   const updates = results.map(r => prisma.labOrderItem.update({
     where: { id: r.item_id },
     data: sanitizeModelInput('LabOrderItem', r, { only: ['result', 'unit', 'ref_range', 'is_abnormal', 'is_critical', 'method', 'notes'] }),
   }));
-  await prisma.$transaction([...updates, prisma.labOrder.update({ where: { id: req.params.id }, data: { status: 'RESULTED', reported_at: new Date() } })]);
+  await prisma.$transaction([...updates, prisma.labOrder.update({ where: { id: order.id }, data: { status: 'RESULTED', reported_at: new Date() } })]);
 
   const hasCritical = results.some(r => r.is_critical);
   emitToLab(req.hospitalId,'lab:updated', { type: hasCritical ? 'CRITICAL_RESULTS' : 'RESULTS_SAVED' });

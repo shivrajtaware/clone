@@ -1,0 +1,5 @@
+ALTER TABLE "patients"
+  ADD COLUMN IF NOT EXISTS "phone_enc" TEXT,
+  ADD COLUMN IF NOT EXISTS "email_enc" TEXT,
+  ADD COLUMN IF NOT EXISTS "address_enc" TEXT,
+  ADD COLUMN IF NOT EXISTS "aadhar_no_enc" TEXT;

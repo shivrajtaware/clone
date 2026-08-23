@@ -110,7 +110,7 @@ async function createWindow() {
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
-    title: 'MediCore HMS',
+    title: 'Dr.AiSolnex HMS',
     backgroundColor: '#ffffff',
     show: false,
     webPreferences: {
@@ -122,7 +122,7 @@ async function createWindow() {
   const showMessage = (title, body) => {
     win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
       <html>
-        <head><title>MediCore HMS</title></head>
+        <head><title>Dr.AiSolnex HMS</title></head>
         <body style="font-family:Segoe UI,Arial,sans-serif;margin:48px;color:#172033;background:#fff">
           <h2>${title}</h2>
           <p>${body}</p>
@@ -146,14 +146,14 @@ async function createWindow() {
 
   win.webContents.on('did-fail-load', (_event, _code, description, validatedURL, isMainFrame) => {
     if (!isMainFrame) return
-    showMessage('MediCore HMS server is not reachable', `${description || 'Connection failed'}: ${validatedURL || ''}`)
+    showMessage('Dr.AiSolnex HMS server is not reachable', `${description || 'Connection failed'}: ${validatedURL || ''}`)
   })
 
-  showMessage('Opening MediCore HMS...', 'Connecting to the server on this network.')
+  showMessage('Opening Dr.AiSolnex HMS...', 'Connecting to the server on this network.')
 
   const serverUrl = await resolveServerUrl()
   if (!(await canReachServer(serverUrl))) {
-    showMessage('MediCore HMS server is not reachable', 'Start the server PC backend and confirm both PCs are on the same network.')
+    showMessage('Dr.AiSolnex HMS server is not reachable', 'Start the server PC backend and confirm both PCs are on the same network.')
     return
   }
 

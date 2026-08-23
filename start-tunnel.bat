@@ -1,2 +1,3 @@
 @echo off
-C:\cloudflared\cloudflared.exe tunnel --url http://localhost:5000
+@echo Starting MediCore public tunnel...
+"C:\Program Files (x86)\cloudflared\cloudflared.exe" tunnel --url http://localhost:5001 --no-autoupdate

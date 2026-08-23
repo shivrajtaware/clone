@@ -61,6 +61,7 @@ export default function PatientsPage() {
   const [addressQuery, setAddressQuery] = useState('')
   const [addressSuggestions, setAddressSuggestions] = useState([])
   const [showSuggestions, setShowSuggestions] = useState(false)
+  const [addressLoading, setAddressLoading] = useState(false)
 
   // Auto-suggest fetch karnya sathi API call
   useEffect(() => {
@@ -70,12 +71,20 @@ export default function PatientsPage() {
         return
       }
       try {
-      // Free OpenStreetMap API for India
-        const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addressQuery)}&format=json&addressdetails=1&countrycodes=in&limit=5`)
+        setAddressLoading(true)
+        // ArcGIS provides a free, India-focused address suggestion endpoint with exact lookup keys.
+        const res = await fetch(`https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/suggest?text=${encodeURIComponent(addressQuery)}&countryCode=IND&maxSuggestions=8&f=json`)
         const data = await res.json()
-        setAddressSuggestions(data)
+        setAddressSuggestions((data.suggestions || []).map(suggestion => ({
+          text: suggestion.text,
+          magicKey: suggestion.magicKey,
+          display_name: suggestion.text,
+        })))
       } catch (err) {
         console.error('Failed to fetch locations', err)
+        setAddressSuggestions([])
+      } finally {
+        setAddressLoading(false)
       }
     }
 
@@ -83,6 +92,46 @@ export default function PatientsPage() {
     const delay = setTimeout(fetchLocations, 500)
     return () => clearTimeout(delay)
   }, [addressQuery])
+
+  const selectLocation = async (loc) => {
+    try {
+      setAddressLoading(true)
+      const params = new URLSearchParams({
+        SingleLine: loc.text || loc.display_name || '',
+        magicKey: loc.magicKey || '',
+        countryCode: 'IND',
+        maxLocations: '1',
+        outFields: '*',
+        f: 'json',
+      })
+      const res = await fetch(`https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?${params}`)
+      const data = await res.json()
+      const candidate = data.candidates?.[0]
+      const attributes = candidate?.attributes || {}
+      const address = candidate?.address || loc.display_name || loc.text
+      setValue('address', address, { shouldValidate: true })
+      if (attributes.City) setValue('city', attributes.City)
+      if (attributes.Region) setValue('state', attributes.Region)
+      if (attributes.Postal) setValue('pincode', attributes.Postal)
+    } catch (err) {
+      setValue('address', loc.display_name || loc.text || '', { shouldValidate: true })
+    } finally {
+      setAddressLoading(false)
+    }
+    setShowSuggestions(false)
+    setAddressQuery('')
+  }
+
+  const submitPatient = (formData) => {
+    const body = { ...formData }
+    if (!body.dob && body.age !== '' && body.age != null) {
+      const birthDate = new Date()
+      birthDate.setFullYear(birthDate.getFullYear() - Number(body.age))
+      body.dob = birthDate.toISOString().slice(0, 10)
+    }
+    delete body.age
+    createMut.mutate(body)
+  }
 
   const createMut = useMutation({
     mutationFn: (body) => api.post('/patients', body).then(r => r.data.data),
@@ -191,12 +240,13 @@ export default function PatientsPage() {
 
       {/* Register Modal */}
       <Modal open={showModal} onClose={() => setShowModal(false)} title="Register New Patient" size="lg">
-        <form onSubmit={handleSubmit(d => createMut.mutate(d))} className="space-y-4">
+        <form onSubmit={handleSubmit(submitPatient)} className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div><label className="label">First Name *</label><input className="input" {...register('first_name', { required: true })} /></div>
             <div><label className="label">Last Name *</label><input className="input" {...register('last_name', { required: true })} /></div>
           </div>
           <div className="grid grid-cols-3 gap-3">
+            <div><label className="label">Age (years)</label><input type="number" min="0" max="130" className="input" placeholder="e.g. 42" {...register('age')} /></div>
             <div><label className="label">Date of Birth</label><input type="date" className="input" {...register('dob')} /></div>
             <div>
               <label className="label">Gender *</label>
@@ -214,7 +264,7 @@ export default function PatientsPage() {
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <div><label className="label">Mobile Number *</label><input className="input" placeholder="+91 XXXXX XXXXX" {...register('phone', { required: true })} /></div>
+            <div><label className="label">Mobile Number (optional)</label><input className="input" placeholder="+91 XXXXX XXXXX" {...register('phone')} /></div>
             <div><label className="label">Email</label><input type="email" className="input" {...register('email')} /></div>
           </div>
           <div className="grid grid-cols-1 gap-3">
@@ -222,42 +272,29 @@ export default function PatientsPage() {
           </div>
           <div className="relative">
             <label className="label">Address</label>
-            <input 
-              className="input" 
-              placeholder="Start typing village, area, or city..."
-              autoComplete="off"
-              {...register('address')} 
+              <input
+                className="input"
+                placeholder="Search area, landmark, village, or city..."
+                autoComplete="off"
+                {...register('address')}
               onChange={(e) => {
                 register('address').onChange(e) // Keep form logic working
                 setAddressQuery(e.target.value)
                 setShowSuggestions(true)
               }}
             />
-  
-                {/* Auto-suggest Dropdown */}
-              {showSuggestions && addressSuggestions.length > 0 && (
+            {showSuggestions && addressLoading && <div className="absolute z-50 w-full mt-1 rounded-lg bg-white p-3 text-xs text-slate-500 shadow-xl">Searching locations…</div>}
+            {showSuggestions && !addressLoading && addressSuggestions.length > 0 && (
                  <ul className="absolute z-50 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-xl max-h-48 overflow-y-auto">
                   {addressSuggestions.map((loc, idx) => (
                     <li 
                       key={idx} 
                       className="p-3 text-xs cursor-pointer hover:bg-cyan-50 border-b border-slate-100 last:border-b-0 text-slate-700"
                       onClick={() => {
-                        // Address set kara
-                        setValue('address', loc.display_name, { shouldValidate: true })
-            
-                        // Auto-fill City, State, and Pincode
-                        if (loc.address) {
-                          const cityName = loc.address.city || loc.address.town || loc.address.village || loc.address.county
-                          if (cityName) setValue('city', cityName)
-                          if (loc.address.state) setValue('state', loc.address.state)
-                          if (loc.address.postcode) setValue('pincode', loc.address.postcode)
-                        }
-            
-                        setShowSuggestions(false)
-                        setAddressQuery('')
-                        }}
+                        selectLocation(loc)
+                      }}
                       >
-                        <div className="font-semibold text-slate-900">{loc.name}</div>
+                        <div className="font-semibold text-slate-900">{loc.text}</div>
                         <div className="text-[10px] text-slate-500 line-clamp-1">{loc.display_name}</div>
                     </li>
                   ))}

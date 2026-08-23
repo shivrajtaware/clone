@@ -92,6 +92,7 @@ router.get('/', async (req, res) => {
         doctor: { select: { id: true, first_name: true, last_name: true, designation: true } },
         department: { select: { id: true, name: true } },
         medicine_stack: { select: { id: true, name: true, condition: true, items: { orderBy: { sort_order: 'asc' } } } },
+        telemedicine_session: true,
       },
     }),
     prisma.appointment.count({ where }),
@@ -172,7 +173,7 @@ router.post('/', async (req, res) => {
   res.status(201).json({ success: true, message: 'Appointment booked', data: appt });
 });
 
-router.post('/:id/complete-opd', async (req, res) => {
+router.post(['/:id/complete-opd', '/:id/telemedicine/complete'], async (req, res) => {
   const appointment = await prisma.appointment.findFirst({
     where: { id: req.params.id, hospital_id: req.hospitalId },
     include: {
@@ -208,6 +209,11 @@ router.post('/:id/complete-opd', async (req, res) => {
   }
   const labTests = [];
   const noteText = optionalText(req.body.notes);
+  const fulfillmentMode = String(req.body.fulfillment_mode || 'HOSPITAL_PHARMACY').toUpperCase();
+  if (!['HOSPITAL_PHARMACY', 'PRESCRIPTION_ONLY'].includes(fulfillmentMode)) badRequest('Invalid prescription fulfilment option');
+  if (appointment.type === 'TELECONSULT' && fulfillmentMode === 'HOSPITAL_PHARMACY' && prescriptionItems.some(item => !item.pharmacy_item_id)) {
+    badRequest('Select every medicine from hospital pharmacy inventory, or choose Prescription only');
+  }
   const labNotes = optionalText(req.body.lab_notes) || noteText;
   const sampleType = optionalText(req.body.sample_type);
 
@@ -216,6 +222,7 @@ router.post('/:id/complete-opd', async (req, res) => {
     let labOrder = null;
     let bill = null;
     let payment = null;
+    let emrNote = null;
 
     // Only inventory-linked medicines can be issued immediately in the OPD room.
     // Unregistered medicines remain on the prescription queue for the pharmacist
@@ -232,7 +239,8 @@ router.post('/:id/complete-opd', async (req, res) => {
           patient_id: appointment.patient_id,
           doctor_id: req.user.id,
           appointment_id: appointment.id,
-          encounter_type: 'OPD',
+          encounter_type: appointment.type === 'TELECONSULT' ? 'TELEMEDICINE' : 'OPD',
+          fulfillment_mode: fulfillmentMode,
           notes: medicineStack ? `Medicine stack: ${medicineStack.name}${noteText ? ` | ${noteText}` : ''}` : noteText,
           items: { create: prescriptionItems.map(item => ({ id: uuidv4(), ...item })) },
         },
@@ -318,6 +326,28 @@ router.post('/:id/complete-opd', async (req, res) => {
       },
     });
 
+    // Telemedicine and OPD consultations share the existing EMR history.
+    emrNote = await tx.eMRNote.create({
+      data: {
+        id: uuidv4(),
+        patient_id: appointment.patient_id,
+        doctor_id: req.user.id,
+        appointment_id: appointment.id,
+        encounter_type: appointment.type === 'TELECONSULT' ? 'TELEMEDICINE' : 'OPD',
+        subjective: optionalText(req.body.subjective) || optionalText(req.body.notes),
+        objective: optionalText(req.body.objective) || optionalText(req.body.findings),
+        assessment: optionalText(req.body.assessment) || optionalText(req.body.diagnosis),
+        plan: optionalText(req.body.plan),
+        icd10_codes: [],
+      },
+    });
+    if (appointment.type === 'TELECONSULT') {
+      await tx.telemedicineSession.updateMany({
+        where: { appointment_id: appointment.id },
+        data: { status: 'COMPLETED', completed_at: new Date() },
+      });
+    }
+
     const fee = { amount: manualConsultationFee, category: 'Consultation', description: `${String(appointment.type || 'REGULAR').replace(/_/g, ' ')} consultation` };
     const chargeItems = [
       ...(fee.amount > 0 ? [{ category: fee.category, description: fee.description, quantity: 1, unit_price: fee.amount, total: fee.amount }] : []),
@@ -365,14 +395,14 @@ router.post('/:id/complete-opd', async (req, res) => {
       }
     }
 
-    return { appointment: updatedAppointment, prescription, labOrder, bill, payment, pharmacy_queue: pharmacyItems.length > 0 };
+    return { appointment: updatedAppointment, prescription, emrNote, labOrder, bill, payment, pharmacy_queue: pharmacyItems.length > 0 };
   });
 
   emitToHospital(req.hospitalId, 'appointments:refresh', { action: 'completed', appointment: result.appointment });
 
   res.json({
     success: true,
-    message: 'OPD completed',
+    message: appointment.type === 'TELECONSULT' ? 'Telemedicine consultation completed' : 'OPD completed',
     data: {
       ...result,
       pharmacy_queue: result.pharmacy_queue,
@@ -382,6 +412,72 @@ router.post('/:id/complete-opd', async (req, res) => {
       payment: result.payment,
     },
   });
+});
+
+// Provider-neutral telemedicine session. The hospital supplies an external,
+// self-hosted Jitsi/BigBlueButton/Matrix/other HTTPS meeting URL; no paid
+// calling SDK or per-minute service is created by this endpoint.
+router.get('/:id/telemedicine', async (req, res) => {
+  const appointment = await prisma.appointment.findFirst({
+    where: { id: req.params.id, hospital_id: req.hospitalId },
+    include: { telemedicine_session: true },
+  });
+  if (!appointment) return res.status(404).json({ success: false, message: 'Appointment not found' });
+  if (appointment.type !== 'TELECONSULT') return badRequest('Only telemedicine appointments can have a calling session');
+  res.json({ success: true, data: appointment.telemedicine_session });
+});
+
+router.post('/:id/telemedicine', async (req, res) => {
+  const appointment = await prisma.appointment.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId } });
+  if (!appointment) return res.status(404).json({ success: false, message: 'Appointment not found' });
+  if (appointment.type !== 'TELECONSULT') badRequest('Mark the appointment as Telemedicine first');
+  if (req.user.role === 'DOCTOR' && appointment.doctor_id !== req.user.id) return res.status(403).json({ success: false, message: 'This appointment is assigned to another doctor' });
+  const mode = String(req.body.mode || 'VIDEO').toUpperCase();
+  const provider = String(req.body.provider || 'EXTERNAL_LINK').toUpperCase();
+  const meetingUrl = String(req.body.meeting_url || '').trim();
+  if (!['AUDIO', 'VIDEO'].includes(mode)) badRequest('Mode must be AUDIO or VIDEO');
+  if (!['EXTERNAL_LINK', 'SELF_HOSTED', 'CUSTOM'].includes(provider)) badRequest('Invalid telemedicine provider');
+  try {
+    const parsed = new URL(meetingUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('protocol');
+  } catch { badRequest('Enter a valid HTTPS meeting or call link'); }
+  if (meetingUrl.length > 2048) badRequest('Meeting link is too long');
+  const session = await prisma.telemedicineSession.upsert({
+    where: { appointment_id: appointment.id },
+    create: { id: uuidv4(), hospital_id: req.hospitalId, appointment_id: appointment.id, mode, provider, meeting_url: meetingUrl },
+    update: { mode, provider, meeting_url: meetingUrl, status: 'SCHEDULED', started_at: null, completed_at: null },
+  });
+  res.status(201).json({ success: true, data: session });
+});
+
+router.patch('/:id/telemedicine/status', async (req, res) => {
+  const requested = String(req.body.status || '').toUpperCase();
+  if (!['SCHEDULED', 'ONGOING', 'COMPLETED', 'CANCELLED'].includes(requested)) badRequest('Invalid telemedicine status');
+  const appointment = await prisma.appointment.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId }, include: { telemedicine_session: true } });
+  if (!appointment) return res.status(404).json({ success: false, message: 'Appointment not found' });
+  if (req.user.role === 'DOCTOR' && appointment.doctor_id !== req.user.id) return res.status(403).json({ success: false, message: 'This appointment is assigned to another doctor' });
+  const appointmentStatus = { SCHEDULED: 'CONFIRMED', ONGOING: 'IN_CONSULTATION', COMPLETED: 'COMPLETED', CANCELLED: 'CANCELLED' }[requested];
+
+  // A teleconsult appointment may pre-date its call-link session (or the
+  // session request may still be catching up). Keep the HMS appointment
+  // workflow usable and idempotent; a call link is still required before a
+  // real audio/video call can be launched.
+  if (!appointment.telemedicine_session) {
+    const updatedAppointment = await prisma.appointment.update({
+      where: { id: appointment.id },
+      data: { status: appointmentStatus, ...(requested === 'COMPLETED' && { completed_at: new Date() }) },
+    });
+    emitToHospital(req.hospitalId, 'appointments:refresh', { action: 'telemedicine_status_updated', appointment_id: appointment.id });
+    return res.json({ success: true, message: 'Appointment status updated; add a call link before starting the consultation', data: null, appointment: updatedAppointment });
+  }
+
+  const session = await prisma.$transaction(async (tx) => {
+    const updated = await tx.telemedicineSession.update({ where: { id: appointment.telemedicine_session.id }, data: { status: requested, ...(requested === 'ONGOING' && { started_at: new Date() }), ...(requested === 'COMPLETED' && { completed_at: new Date() }) } });
+    await tx.appointment.update({ where: { id: appointment.id }, data: { status: appointmentStatus, ...(requested === 'COMPLETED' && { completed_at: new Date() }) } });
+    return updated;
+  });
+  emitToHospital(req.hospitalId, 'appointments:refresh', { action: 'telemedicine_status_updated', appointment_id: appointment.id });
+  res.json({ success: true, data: session });
 });
 
 router.patch('/:id/status', async (req, res) => {
@@ -404,6 +500,10 @@ router.patch('/:id/status', async (req, res) => {
     data: updates,
     include: { medicine_stack: { select: { id: true, name: true, condition: true } } },
   });
+
+  if (status === 'CANCELLED') {
+    await prisma.telemedicineSession.updateMany({ where: { appointment_id: appt.id }, data: { status: 'CANCELLED' } });
+  }
 
   emitToHospital(req.hospitalId, 'appointments:refresh', { action: 'status_updated', appointment: appt });
 

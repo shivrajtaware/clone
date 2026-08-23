@@ -16,6 +16,7 @@ import DashboardPage    from './pages/DashboardPage'
 import PatientsPage     from './pages/PatientsPage'
 import PatientDetailPage from './pages/PatientDetailPage'
 import AppointmentsPage from './pages/AppointmentsPage'
+import TelemedicinePage from './pages/TelemedicinePage'
 import EMRPage          from './pages/EMRPage'
 import BedsPage         from './pages/BedsPage'
 import ICUPage          from './pages/ICUPage'
@@ -74,7 +75,7 @@ const LegacySuperAdminRoute = ({ children }) => {
 const SessionLoader = () => (
   <div className="flex h-screen flex-col items-center justify-center gap-3 bg-white text-slate-700">
     <div className="h-8 w-8 rounded-full border-2 border-slate-200 border-t-pink-600 animate-spin" />
-    <div className="text-sm font-medium">Opening MediCore HMS...</div>
+    <div className="text-sm font-medium">Opening Dr.AiSolnex HMS...</div>
   </div>
 )
 
@@ -159,6 +160,7 @@ const MODULE_HOME = {
   ANALYTICS: '/analytics',
   PATIENTS: '/patients',
   APPOINTMENTS: '/appointments',
+  TELEMEDICINE: '/telemedicine',
   MEDICINE_STACKS: '/medicine-stacks',
   EMR: '/emr',
   EMERGENCY: '/emergency',
@@ -214,6 +216,7 @@ export default function App() {
         <Route path="patients"          element={<ModuleRoute module="PATIENTS"><PatientsPage /></ModuleRoute>} />
         <Route path="patients/:id"      element={<ModuleRoute module="PATIENTS"><PatientDetailPage /></ModuleRoute>} />
         <Route path="appointments"      element={<ModuleRoute module="APPOINTMENTS"><AppointmentsPage /></ModuleRoute>} />
+        <Route path="telemedicine"      element={<ModuleRoute module="APPOINTMENTS"><TelemedicinePage /></ModuleRoute>} />
         <Route path="emr"               element={<ModuleRoute module="EMR"><EMRPage /></ModuleRoute>} />
         <Route path="emr/:patientId"    element={<ModuleRoute module="EMR"><EMRPage /></ModuleRoute>} />
         <Route path="beds"              element={<ModuleRoute module="BEDS"><BedsPage /></ModuleRoute>} />

@@ -11,6 +11,15 @@ const {
 } = require('../utils/prismaInput');
 const { generatePatientBarcode } = require('../utils/barcodeGenerator');
 const { emitToPatients } = require('../config/socket');
+const { encrypt } = require('../utils/fieldEncryption');
+
+const addEncryptedPatientFields = (data) => ({
+  ...data,
+  ...(data.phone !== undefined && { phone_enc: encrypt(data.phone) }),
+  ...(data.email !== undefined && { email_enc: encrypt(data.email) }),
+  ...(data.address !== undefined && { address_enc: encrypt(data.address) }),
+  ...(data.aadhar_no !== undefined && { aadhar_no_enc: encrypt(data.aadhar_no) }),
+});
 
 // Generate UHID: HC-XXXXXX
 const generateUHID = async (hospitalId) => {
@@ -98,9 +107,9 @@ exports.create = async (req, res) => {
 
   const uhid = await generateUHID(req.hospitalId);
 
-  const processedData = sanitizeModelInput('Patient', patientData, {
+  const processedData = addEncryptedPatientFields(sanitizeModelInput('Patient', patientData, {
     exclude: ['id', 'hospital_id', 'uhid'],
-  });
+  }));
   requireFields(processedData, ['first_name', 'last_name', 'gender']);
 
   const contactRows = normalizeEmergencyContacts(emergency_contacts);
@@ -169,9 +178,9 @@ exports.update = async (req, res) => {
   delete updateData.insurance_details;
   delete updateData._allergies_note;
 
-  const processedData = sanitizeModelInput('Patient', updateData, {
+  const processedData = addEncryptedPatientFields(sanitizeModelInput('Patient', updateData, {
     exclude: ['id', 'hospital_id', 'uhid'],
-  });
+  }));
 
   const patient = await prisma.patient.update({
     where: { id: req.params.id },
@@ -185,12 +194,14 @@ exports.update = async (req, res) => {
 
 exports.getTimeline = async (req, res) => {
   const { id } = req.params;
+  const patient = await prisma.patient.findFirst({ where: { id, hospital_id: req.hospitalId }, select: { id: true } });
+  if (!patient) return res.status(404).json({ success: false, message: 'Patient not found' });
   const [admissions, appointments, labOrders, prescriptions, vitals] = await Promise.all([
-    prisma.admission.findMany({ where: { patient_id: id }, orderBy: { admission_date: 'desc' }, include: { bed: true } }),
-    prisma.appointment.findMany({ where: { patient_id: id }, orderBy: { appointment_date: 'desc' }, take: 20 }),
-    prisma.labOrder.findMany({ where: { patient_id: id }, orderBy: { created_at: 'desc' }, take: 10 }),
-    prisma.prescription.findMany({ where: { patient_id: id }, include: { items: true }, orderBy: { prescribed_at: 'desc' }, take: 10 }),
-    prisma.vitals.findMany({ where: { patient_id: id }, orderBy: { recorded_at: 'desc' }, take: 20 }),
+    prisma.admission.findMany({ where: { patient_id: id, hospital_id: req.hospitalId }, orderBy: { admission_date: 'desc' }, include: { bed: true } }),
+    prisma.appointment.findMany({ where: { patient_id: id, hospital_id: req.hospitalId }, orderBy: { appointment_date: 'desc' }, take: 20 }),
+    prisma.labOrder.findMany({ where: { patient_id: id, hospital_id: req.hospitalId }, orderBy: { created_at: 'desc' }, take: 10 }),
+    prisma.prescription.findMany({ where: { patient_id: id, patient: { hospital_id: req.hospitalId } }, include: { items: true }, orderBy: { prescribed_at: 'desc' }, take: 10 }),
+    prisma.vitals.findMany({ where: { patient_id: id, patient: { hospital_id: req.hospitalId } }, orderBy: { recorded_at: 'desc' }, take: 20 }),
   ]);
   res.json({ success: true, data: { admissions, appointments, labOrders, prescriptions, vitals } });
 };

@@ -49,7 +49,7 @@ services:
       - ./backend/uploads:/app/uploads
       - ./backend/logs:/app/logs
     command: >
-      sh -c "npm run prisma:migrate && npm run seed && npm start"
+      sh -c "npm run prisma:migrate && npm start"
     networks:
       - medicore_network
     security_opt:

@@ -32,6 +32,7 @@ model Hospital {
   updated_at      DateTime          @updatedAt
   ambulances      Ambulance[]
   appointments    Appointment[]
+  telemedicine_sessions TelemedicineSession[]
   assets          Asset[]
   beds            Bed[]
   bills           Bill[]
@@ -116,12 +117,19 @@ model RefreshSession {
   user_id    String
   token_hash String   @unique
   expires_at DateTime
+  revoked_at DateTime?
+  replaced_by String?
+  user_agent String?
+  ip_address String?
+  device_name String?
+  last_used_at DateTime?
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
   user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@index([user_id])
   @@index([expires_at])
+  @@index([revoked_at])
   @@map("refresh_sessions")
 }
 
@@ -175,9 +183,12 @@ model Patient {
   gender             Gender
   blood_group        BloodGroup?
   phone              String?
+  phone_enc          String?
   alternate_phone    String?
   email              String?
+  email_enc          String?
   address            String?
+  address_enc        String?
   city               String?
   state              String?
   pincode            String?
@@ -186,6 +197,7 @@ model Patient {
   occupation         String?
   marital_status     MaritalStatus?
   aadhar_no          String?
+  aadhar_no_enc      String?
   photo              String?
   language           String             @default("English")
   barcode_data       String?
@@ -297,8 +309,28 @@ model Appointment {
   medicine_stack    MedicineStack?    @relation(fields: [medicine_stack_id], references: [id], onDelete: SetNull)
   patient           Patient           @relation(fields: [patient_id], references: [id])
   bill              Bill?
+  telemedicine_session TelemedicineSession?
 
   @@map("appointments")
+}
+
+model TelemedicineSession {
+  id             String                 @id @default(uuid())
+  appointment_id String                 @unique
+  mode           TelemedicineMode       @default(VIDEO)
+  provider       TelemedicineProvider   @default(EXTERNAL_LINK)
+  meeting_url    String
+  status         TelemedicineStatus     @default(SCHEDULED)
+  started_at     DateTime?
+  completed_at   DateTime?
+  created_at     DateTime               @default(now())
+  updated_at     DateTime               @updatedAt
+  appointment    Appointment            @relation(fields: [appointment_id], references: [id], onDelete: Cascade)
+  hospital_id    String
+  hospital       Hospital               @relation(fields: [hospital_id], references: [id])
+
+  @@index([hospital_id, status])
+  @@map("telemedicine_sessions")
 }
 
 model MedicineStack {
@@ -464,6 +496,7 @@ model Prescription {
   appointment_id String?
   admission_id   String?
   encounter_type String   @default("OPD")
+  fulfillment_mode PrescriptionFulfillment @default(HOSPITAL_PHARMACY)
   items         PrescriptionItem[]
   doctor        User               @relation("DoctorPrescriptions", fields: [doctor_id], references: [id])
   patient       Patient            @relation(fields: [patient_id], references: [id])
@@ -1174,6 +1207,9 @@ model AuditLog {
   new_values  Json?
   ip_address  String?
   user_agent  String?
+  request_id  String?
+  previous_hash String?
+  entry_hash  String?
   created_at  DateTime @default(now())
   user        User?    @relation(fields: [user_id], references: [id])
 
@@ -1288,6 +1324,29 @@ enum AppointmentStatus {
   COMPLETED
   NO_SHOW
   CANCELLED
+}
+
+enum TelemedicineMode {
+  AUDIO
+  VIDEO
+}
+
+enum TelemedicineProvider {
+  EXTERNAL_LINK
+  SELF_HOSTED
+  CUSTOM
+}
+
+enum TelemedicineStatus {
+  SCHEDULED
+  ONGOING
+  COMPLETED
+  CANCELLED
+}
+
+enum PrescriptionFulfillment {
+  HOSPITAL_PHARMACY
+  PRESCRIPTION_ONLY
 }
 
 enum Priority {

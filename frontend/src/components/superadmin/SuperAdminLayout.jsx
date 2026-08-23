@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import useAuthStore from '../../context/authStore'
 import clsx from 'clsx'
-import { BarChart3, Building2, DoorOpen, FileText, Globe2, LockKeyhole, Settings, Shield } from 'lucide-react'
+import { BarChart3, Building2, DoorOpen, FileText, Globe2, LockKeyhole, Settings } from 'lucide-react'
 
 const SA_NAV = [
   { to: '/superadmin', icon: BarChart3, label: 'Dashboard', end: true },
@@ -30,7 +30,7 @@ export default function SuperAdminLayout() {
       >
         <div className="h-[62px] flex items-center gap-2.5 px-4 border-b border-default">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-pink-300 via-cyan to-cyan-dark flex items-center justify-center shadow-glow-cyan text-white">
-            <Shield size={19} />
+            <img src="/brand-mark.png" alt="Dr.AiSolnex" className="w-8 h-8 object-contain" />
           </div>
           <div className="min-w-0">
             <div className="text-sm font-bold text-white truncate">Dr.AiSolnex</div>

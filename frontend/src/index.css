@@ -23,6 +23,14 @@
     overflow: hidden;
   }
 
+  /* Public Cloudflare demo only — increases readability without changing the
+     local application or shrinking the root layout. */
+  @media (min-width: 1024px) {
+    html.public-demo-scale { font-size: 18px; }
+    html.public-demo-scale body { font-size: 16px; }
+  }
+
+
   body {
     @apply font-sans;
     color: #13070f;
@@ -364,6 +372,26 @@
   .text-white { color: #12060e !important; }
   .text-slate-200, .text-slate-300 { color: #150912 !important; }
   .text-slate-400, .text-slate-500 { color: #2f1a28 !important; }
+
+  [data-section-title="Prescription fulfilment"] {
+    min-height: 30px;
+    color: #160a12 !important;
+  }
+  [data-section-title="Prescription fulfilment"] + div button {
+    min-height: 116px;
+    white-space: normal !important;
+    text-align: left;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    color: #160a12 !important;
+  }
+  [data-section-title="Prescription fulfilment"] + div button div {
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+  }
+  [data-section-title="Prescription fulfilment"] + div button .text-slate-400 {
+    color: #4b3040 !important;
+  }
   .bg-navy-900,
   .bg-navy-800,
   .bg-navy-700,

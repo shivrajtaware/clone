@@ -26,6 +26,7 @@ import {
   TrendingUp,
   Users,
   Utensils,
+  Video,
 } from 'lucide-react'
 
 const NAV = [
@@ -36,6 +37,7 @@ const NAV = [
   { section: 'Clinical', items: [
     { to: '/patients', icon: Users, label: 'Patients', module: 'PATIENTS' },
     { to: '/appointments', icon: CalendarDays, label: 'Appointments', module: 'APPOINTMENTS' },
+    { to: '/telemedicine', icon: Video, label: 'Telemedicine', module: 'APPOINTMENTS' },
     { to: '/medicine-stacks', icon: Pill, label: 'Medicine Stacks', module: 'MEDICINE_STACKS' },
     { to: '/emr', icon: ClipboardList, label: 'EMR / Records', module: 'EMR' },
     { to: '/emergency', icon: BellDot, label: 'Emergency', module: 'EMERGENCY', alert: true },
@@ -82,7 +84,7 @@ export default function Sidebar({ collapsed, onToggle }) {
     >
       <div className="flex items-center gap-2.5 h-[62px] px-4 border-b border-default flex-shrink-0">
         <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-pink-300 via-cyan to-cyan-dark flex items-center justify-center flex-shrink-0 shadow-glow-cyan text-white">
-          <Building2 size={19} strokeWidth={2.4} />
+          <img src="/brand-mark.png" alt="Dr.AiSolnex" className="w-8 h-8 object-contain" />
         </div>
         {!collapsed && (
           <div className="overflow-hidden">

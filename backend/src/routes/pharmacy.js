@@ -381,9 +381,10 @@ router.get('/prescriptions', async (req, res) => {
   const pharmacyPrescriptions = prescriptions
     .map(p => ({ ...p, items: p.items.filter(item => !item.collect_bill_here || !item.pharmacy_item_id) }))
     .filter(p => p.items.length);
+  const fulfillmentPrescriptions = pharmacyPrescriptions.filter(p => p.fulfillment_mode !== 'PRESCRIPTION_ONLY');
   res.json({
     success: true,
-    data: pharmacyPrescriptions.map(p => ({
+    data: fulfillmentPrescriptions.map(p => ({
       ...p,
       dispense_status: dispenseMap.has(p.id) ? 'DISPENSED' : 'PENDING',
       dispense: dispenseMap.get(p.id) || null,
@@ -574,16 +575,18 @@ router.get('/inventory', async (req, res) => {
 
 router.get('/medicine-suggestions', async (req, res) => {
   const search = String(req.query.search || '').trim();
-  if (search.length < 2) return res.json({ success: true, data: [] });
 
   const items = await prisma.pharmacyItem.findMany({
     where: {
       hospital_id: req.hospitalId,
+      ...(search.length >= 2 ? {} : { current_stock: { gt: 0 } }),
       OR: [
-        { generic_name: { contains: search, mode: 'insensitive' } },
-        { brand_name: { contains: search, mode: 'insensitive' } },
-        { strength: { contains: search, mode: 'insensitive' } },
-        { form: { contains: search, mode: 'insensitive' } },
+        ...(search.length >= 2 ? [
+          { generic_name: { contains: search, mode: 'insensitive' } },
+          { brand_name: { contains: search, mode: 'insensitive' } },
+          { strength: { contains: search, mode: 'insensitive' } },
+          { form: { contains: search, mode: 'insensitive' } },
+        ] : [{ current_stock: { gt: 0 } }]),
       ],
     },
     include: {
@@ -592,7 +595,7 @@ router.get('/medicine-suggestions', async (req, res) => {
         orderBy: [{ expiry_date: 'asc' }, { created_at: 'asc' }],
       },
     },
-    orderBy: [{ generic_name: 'asc' }, { brand_name: 'asc' }],
+    orderBy: search.length >= 2 ? [{ generic_name: 'asc' }, { brand_name: 'asc' }] : [{ current_stock: 'desc' }, { generic_name: 'asc' }],
     take: 12,
   });
 

@@ -7,11 +7,14 @@ const morgan = require('morgan');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+const crypto = require('crypto');
 
 const errorHandler = require('./middleware/errorHandler');
 const auth = require('./middleware/auth');
 const moduleAccess = require('./middleware/moduleAccess');
 const logger = require('./utils/logger');
+const requestHardening = require('./middleware/requestHardening');
+const auditRequest = require('./middleware/auditRequest');
 
 const parsePositiveInt = (value, fallback) => {
   const parsed = Number.parseInt(value, 10);
@@ -47,12 +50,15 @@ const communicationRoutes = require('./routes/communication');
 const mortuaryRoutes     = require('./routes/mortuary');
 const medicineStackRoutes = require('./routes/medicineStacks');
 const barcodeRoutes      = require('./routes/barcode');
+const fileRoutes         = require('./routes/files');
 
 const app = express();
 app.set('trust proxy', 1);
 // ── Security ──────────────────────────────────────────────────
 app.use(helmet({
-  contentSecurityPolicy: false
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  referrerPolicy: { policy: 'no-referrer' },
 }));
 
 // ── CORS ──────────────────────────────────────────────────────
@@ -81,7 +87,7 @@ const normalizedOrigin = origin.toLowerCase();
 
 if (
   allowedOrigins.includes(normalizedOrigin) ||
-  normalizedOrigin.endsWith('.trycloudflare.com')
+  (process.env.ALLOW_CLOUDFLARE_ORIGINS === 'true' && normalizedOrigin.endsWith('.trycloudflare.com'))
 ) {
   return callback(null, true);
 }
@@ -126,6 +132,13 @@ app.use('/api/auth/refresh', authLimiter);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(compression());
+app.use(requestHardening);
+app.use(auditRequest);
+app.use((req, res, next) => {
+  req.id = req.headers['x-request-id'] || crypto.randomUUID();
+  res.setHeader('X-Request-ID', req.id);
+  next();
+});
 
 // ── Logging ───────────────────────────────────────────────────
 if (process.env.NODE_ENV !== 'test') {
@@ -134,8 +147,8 @@ if (process.env.NODE_ENV !== 'test') {
   }));
 }
 
-// ── Static Files (uploads) ────────────────────────────────────
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+// Uploads must never be public. Use authenticated /api/files endpoints instead.
+app.use('/uploads', (req, res) => res.status(404).json({ success: false, message: 'Direct file access is disabled' }));
 
 // ── Health Check ──────────────────────────────────────────────
 app.get('/health', (req, res) => {
@@ -179,6 +192,7 @@ app.use(`${API}/communication`, auth, moduleAccess('COMMUNICATION'), communicati
 app.use(`${API}/mortuary`,      auth, moduleAccess('MORTUARY'), mortuaryRoutes);
 app.use(`${API}/medicine-stacks`, auth, moduleAccess('MEDICINE_STACKS'), medicineStackRoutes);
 app.use(`${API}/barcode`,       barcodeRoutes);
+app.use(`${API}/files`,         auth, moduleAccess('RADIOLOGY'), fileRoutes);
 // ── React Production Build ────────────────────────────────────
 const frontendPath = path.resolve(__dirname, '../../frontend/dist');
 

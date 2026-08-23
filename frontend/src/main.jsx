@@ -7,6 +7,13 @@ import { Toaster } from 'react-hot-toast'
 import App from './App'
 import './index.css'
 
+// The public demo is commonly opened at 100% browser zoom while the local
+// workstation runs at a higher remembered zoom. Keep the presentation scale
+// local to Cloudflare Quick Tunnel URLs so localhost remains untouched.
+if (window.location.hostname.endsWith('.trycloudflare.com')) {
+  document.documentElement.classList.add('public-demo-scale')
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

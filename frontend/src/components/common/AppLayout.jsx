@@ -21,6 +21,7 @@ export default function AppLayout() {
 
   useEffect(() => { setMobileSidebarOpen(false) }, [location.pathname])
 
+
   return (
     <div className="flex h-screen overflow-hidden glass-shell">
       {/* Mobile overlay */}

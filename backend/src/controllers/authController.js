@@ -20,6 +20,16 @@ const generateTokens = (user, sessionId) => {
   return { token, refreshToken };
 };
 
+const sessionView = (session) => ({
+  id: session.id,
+  device_name: session.device_name || 'Unknown device',
+  user_agent: session.user_agent,
+  ip_address: session.ip_address,
+  created_at: session.created_at,
+  last_used_at: session.last_used_at,
+  expires_at: session.expires_at,
+});
+
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -67,7 +77,16 @@ exports.login = async (req, res) => {
     await prisma.$transaction([
       prisma.refreshSession.deleteMany({ where: { expires_at: { lt: new Date() } } }),
       prisma.refreshSession.create({
-        data: { id: sessionId, user_id: user.id, token_hash: hashToken(refreshToken), expires_at: new Date(refreshPayload.exp * 1000) },
+        data: {
+          id: sessionId,
+          user_id: user.id,
+          token_hash: hashToken(refreshToken),
+          expires_at: new Date(refreshPayload.exp * 1000),
+          user_agent: req.get('user-agent')?.slice(0, 500),
+          ip_address: req.ip,
+          device_name: req.body.deviceName?.toString().slice(0, 100) || null,
+          last_used_at: new Date(),
+        },
       }),
       prisma.user.update({ where: { id: user.id }, data: { refresh_token: null, last_login: new Date() } }),
     ]);
@@ -100,16 +119,24 @@ exports.refreshToken = async (req, res) => {
       where: { id: decoded.sessionId },
       include: { user: true },
     });
-    if (!session || session.user_id !== decoded.userId || session.expires_at < new Date() || session.token_hash !== hashToken(refreshToken) || !session.user.is_active) {
+    if (!session || session.user_id !== decoded.userId || session.revoked_at || session.expires_at < new Date() || !session.user.is_active) {
       return res.status(401).json({ success: false, message: 'Invalid refresh token' });
     }
 
-    const tokens = generateTokens(session.user, session.id);
+    if (session.token_hash !== hashToken(refreshToken)) {
+      // A rotated token was replayed. Revoke the affected session family.
+      await prisma.refreshSession.update({ where: { id: session.id }, data: { revoked_at: new Date() } });
+      await prisma.refreshSession.updateMany({ where: { user_id: session.user_id, revoked_at: null }, data: { revoked_at: new Date() } });
+      return res.status(401).json({ success: false, message: 'Refresh token reuse detected. Please sign in again.' });
+    }
+
+    const nextSessionId = uuidv4();
+    const tokens = generateTokens(session.user, nextSessionId);
     const refreshPayload = jwt.decode(tokens.refreshToken);
-    await prisma.refreshSession.update({
-      where: { id: session.id },
-      data: { token_hash: hashToken(tokens.refreshToken), expires_at: new Date(refreshPayload.exp * 1000) },
-    });
+    await prisma.$transaction([
+      prisma.refreshSession.update({ where: { id: session.id }, data: { revoked_at: new Date(), replaced_by: nextSessionId, last_used_at: new Date() } }),
+      prisma.refreshSession.create({ data: { id: nextSessionId, user_id: session.user_id, token_hash: hashToken(tokens.refreshToken), expires_at: new Date(refreshPayload.exp * 1000), user_agent: req.get('user-agent')?.slice(0, 500), ip_address: req.ip, device_name: session.device_name, last_used_at: new Date() } }),
+    ]);
     logger.info('Token refreshed', { userId: session.user.id });
 
     res.json({ success: true, data: tokens });
@@ -122,7 +149,7 @@ exports.refreshToken = async (req, res) => {
 exports.logout = async (req, res) => {
   try {
     if (req.auth?.sessionId) {
-      await prisma.refreshSession.deleteMany({ where: { id: req.auth.sessionId, user_id: req.user.id } });
+      await prisma.refreshSession.updateMany({ where: { id: req.auth.sessionId, user_id: req.user.id, revoked_at: null }, data: { revoked_at: new Date() } });
     }
     logger.info('User logged out', { userId: req.user.id });
     res.json({ success: true, message: 'Logged out successfully' });
@@ -130,6 +157,28 @@ exports.logout = async (req, res) => {
     logger.error('Logout error', { userId: req.user.id, error: err.message });
     res.status(500).json({ success: false, message: 'Logout failed' });
   }
+};
+
+exports.listSessions = async (req, res) => {
+  const sessions = await prisma.refreshSession.findMany({
+    where: { user_id: req.user.id, revoked_at: null, expires_at: { gt: new Date() } },
+    orderBy: { last_used_at: 'desc' },
+  });
+  res.json({ success: true, data: sessions.map(sessionView) });
+};
+
+exports.revokeSession = async (req, res) => {
+  const result = await prisma.refreshSession.updateMany({
+    where: { id: req.params.id, user_id: req.user.id, revoked_at: null },
+    data: { revoked_at: new Date() },
+  });
+  if (!result.count) return res.status(404).json({ success: false, message: 'Session not found' });
+  res.json({ success: true, message: 'Session revoked' });
+};
+
+exports.revokeAllSessions = async (req, res) => {
+  await prisma.refreshSession.updateMany({ where: { user_id: req.user.id, revoked_at: null }, data: { revoked_at: new Date() } });
+  res.json({ success: true, message: 'All sessions revoked. Please sign in again on this device.' });
 };
 
 exports.me = async (req, res) => {

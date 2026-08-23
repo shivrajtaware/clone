@@ -7,9 +7,14 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "seed": "node prisma/seed.js",
+    "seed:demo": "node prisma/demo-seed.js",
+    "seed:workflow": "node prisma/demo-workflow.js",
+    "pharmacy:demo-import": "node scripts/clone-pharmacy-backup-to-demo.js",
     "reset:clean": "node prisma/reset-clean.js",
+    "security:encrypt-patient-fields": "node scripts/encrypt-patient-fields.js",
+    "test": "node --test test/*.test.js",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate": "prisma migrate deploy",
     "prisma:studio": "prisma studio"
   },
   "dependencies": {
