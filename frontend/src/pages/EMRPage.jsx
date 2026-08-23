@@ -767,7 +767,7 @@ function ClinicalPrescriptionControls({ item, onChange }) {
         </div>
         <div>
           <label className="label">Duration</label>
-          <div className="flex gap-1">{[3, 5, 7, 10].map(days => <button key={days} type="button" className={`btn flex-1 px-1 py-1 text-xs ${item.duration === `${days} days` ? 'border-cyan text-cyan' : ''}`} onClick={() => onChange({ duration: `${days} days` })}>{days}d</button>)}</div>
+          <div className="flex gap-1"><div className="flex min-w-0 flex-1 gap-1">{[3, 5, 7, 10].map(days => <button key={days} type="button" className={`btn flex-1 px-1 py-1 text-xs ${item.duration === `${days} days` ? 'border-cyan text-cyan' : ''}`} onClick={() => onChange({ duration: `${days} days` })}>{days}d</button>)}</div><input className="input w-24 px-2 py-1 text-xs" type="text" aria-label="Custom duration" placeholder="Other" value={item.duration && ![3, 5, 7, 10].some(days => item.duration === `${days} days`) ? item.duration : ''} onChange={e => onChange({ duration: e.target.value })} /></div>
         </div>
         <div>
           <label className="label">Instructions</label>
