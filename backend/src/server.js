@@ -12,7 +12,9 @@ const server = http.createServer(app);
 
 initSocket(server);
 
-server.listen(PORT, () => {
+// Bind explicitly on every interface so LAN/Tauri clients can reach the
+// server after a restart on Windows as well as in containers.
+server.listen(PORT, '0.0.0.0', () => {
   logger.info(`🏥 MediCore HMS Backend running on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV}`);
   logger.info(`API Base URL: http://localhost:${PORT}/api`);

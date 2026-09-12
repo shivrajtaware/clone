@@ -8,7 +8,7 @@ const validate = (req, res, next) => {
     return res.status(400).json({
       success: false,
       message: 'Validation failed',
-      errors: errors.array().map(e => ({ field: e.param, message: e.msg })),
+      errors: errors.array().map(e => ({ field: e.path || e.param, message: e.msg })),
     });
   }
   next();
@@ -19,13 +19,15 @@ const validators = {
   // Auth validators
   loginValidator: [
     body('email').isEmail().trim().normalizeEmail(),
-    body('password').isLength({ min: 8 }).escape(),
+    // Passwords are secrets, not HTML. Escaping changes valid passwords such
+    // as `A&Bsecure!` before bcrypt compares them.
+    body('password').isString().isLength({ min: 8 }),
   ],
 
   changePasswordValidator: [
-    body('currentPassword').notEmpty().isLength({ min: 8 }).escape(),
-    body('newPassword').isLength({ min: 8 }).escape(),
-    body('confirmPassword').isLength({ min: 8 }).escape(),
+    body('currentPassword').isString().notEmpty().isLength({ min: 8 }),
+    body('newPassword').isString().isLength({ min: 8 }),
+    body('confirmPassword').isString().isLength({ min: 8 }),
   ],
 
   // Patient validators
@@ -33,8 +35,13 @@ const validators = {
     body('first_name').trim().notEmpty().isLength({ min: 2, max: 50 }),
     body('last_name').trim().notEmpty().isLength({ min: 2, max: 50 }),
     body('gender').isIn(['MALE', 'FEMALE', 'OTHER']),
-    body('phone').optional().isMobilePhone(),
-    body('email').optional().isEmail().normalizeEmail(),
+    // Empty optional form controls arrive as ''. Treat them as absent. Accept
+    // common Indian formats such as +91 98765 43210 and 09876543210.
+    body('phone').optional({ values: 'falsy' }).custom(value => {
+      const normalized = String(value).replace(/[\s().-]/g, '');
+      return /^\+?[0-9]{7,15}$/.test(normalized);
+    }).withMessage('Phone must contain 7 to 15 digits'),
+    body('email').optional({ values: 'falsy' }).isEmail().normalizeEmail(),
   ],
 
   // ID validator

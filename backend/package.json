@@ -14,7 +14,7 @@
     "security:encrypt-patient-fields": "node scripts/encrypt-patient-fields.js",
     "test": "node --test test/*.test.js",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate deploy",
+    "prisma:migrate": "prisma generate && prisma migrate deploy",
     "prisma:studio": "prisma studio"
   },
   "dependencies": {

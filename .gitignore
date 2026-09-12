@@ -8,6 +8,9 @@ uploads/
 .DS_Store
 *.pem
 .prisma/
+*.npm-cache/
+backend/.npm-cache/
+frontend/.npm-cache/
 
 # Local deployment data and credentials
 backups/pharmacy/*.json

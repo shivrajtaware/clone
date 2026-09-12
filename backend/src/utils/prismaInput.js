@@ -198,7 +198,7 @@ const findPatientByReference = async (prisma, hospitalId, reference) => {
 
 const resolvePatientId = async (prisma, hospitalId, reference) => {
   const patient = await findPatientByReference(prisma, hospitalId, reference);
-  if (!patient) badRequest(`Patient not found for "${reference}". Use a registered patient's UHID.`);
+  if (!patient) badRequest(`Patient not found for "${reference}". Enter an exact registered patient name or UHID.`);
   return patient.id;
 };
 

@@ -11,7 +11,7 @@ export default function Modal({ open, onClose, title, children, size = 'md' }) {
   const sizes = { sm: 'max-w-sm', md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-4xl', full: 'max-w-6xl' }
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose?.()}>
+    <div className="modal-overlay">
       <div className={`modal w-full ${sizes[size] || sizes.md}`}>
         {title && (
           <div className="modal-title">

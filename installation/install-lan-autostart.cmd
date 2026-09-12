@@ -1,5 +1,10 @@
 @echo off
+setlocal
 net session >nul 2>&1 || (echo Run this file as administrator.& exit /b 1)
-netsh advfirewall firewall delete rule name="MediCore HMS LAN" >nul 2>&1
-netsh advfirewall firewall add rule name="MediCore HMS LAN" dir=in action=allow protocol=TCP localport=5000 profile=private
-schtasks /Create /TN "MediCore HMS Server" /SC ONLOGON /RL LIMITED /TR "C:\clone-main\Aisolnex\installation\server-startup.cmd" /F
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup-windows-no-docker.ps1"
+if errorlevel 1 (
+  echo Setup failed. No application data was reset by the setup script.
+  pause
+  exit /b 1
+)
+pause

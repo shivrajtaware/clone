@@ -12,7 +12,9 @@ use std::{
 };
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-const DEFAULT_SERVER_URL: &str = "http://DESKTOP-5OD2NDB:5000";
+// The Tauri package is a LAN client, not a second database. Localhost is the
+// safe default on the server PC; workstations fall through to LAN discovery.
+const DEFAULT_SERVER_URL: &str = "http://localhost:5000";
 
 #[derive(Debug, Deserialize)]
 struct ServerConfig {
@@ -47,13 +49,15 @@ fn server_url(app: &AppHandle) -> String {
     let resource_config = app.path().resource_dir().ok().map(|path| path.join("server-config.json"));
     let executable_config = env::current_exe().ok().map(|path| path.with_file_name("server-config.json"));
 
-    for path in [app_config, resource_config, executable_config].into_iter().flatten() {
+    // Prefer an operator-supplied configuration beside the executable or in
+    // the user app-data folder. The bundled file remains a safe default.
+    for path in [executable_config, app_config, resource_config].into_iter().flatten() {
         if let Some(value) = read_config(path) {
             return value;
         }
     }
 
-    discover_lan_server().unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
+    DEFAULT_SERVER_URL.to_string()
 }
 
 fn is_healthy_server(url: &str) -> bool {
@@ -67,20 +71,22 @@ fn is_healthy_server(url: &str) -> bool {
         Ok(values) => values,
         Err(_) => return false,
     };
-    let socket = match addresses.next() {
-        Some(value) => value,
-        None => return false,
-    };
-    let mut stream = match TcpStream::connect_timeout(&socket, Duration::from_millis(250)) {
-        Ok(value) => value,
-        Err(_) => return false,
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let _ = stream.write_all(b"GET /health HTTP/1.1\r\nHost: medicore-lan-client\r\nConnection: close\r\n\r\n");
-    let mut response = [0_u8; 1024];
-    let size = stream.read(&mut response).unwrap_or(0);
-    let body = String::from_utf8_lossy(&response[..size]);
-    body.contains("200") && body.contains("MediCore HMS API")
+    // Windows hostnames can resolve to VPN, IPv6 link-local, APIPA and LAN
+    // addresses. A successful server response from *any* resolved address is
+    // sufficient; rejecting the first address makes healthy LAN clients look
+    // like a network failure.
+    addresses.any(|socket| {
+        let mut stream = match TcpStream::connect_timeout(&socket, Duration::from_millis(250)) {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        let _ = stream.write_all(b"GET /health HTTP/1.1\r\nHost: medicore-lan-client\r\nConnection: close\r\n\r\n");
+        let mut response = [0_u8; 1024];
+        let size = stream.read(&mut response).unwrap_or(0);
+        let body = String::from_utf8_lossy(&response[..size]);
+        body.contains("200") && body.contains("MediCore HMS API")
+    })
 }
 
 fn local_ipv4() -> Option<Ipv4Addr> {
@@ -123,11 +129,14 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let configured = server_url(app.handle());
-            let url = if is_healthy_server(&configured) {
-                configured
-            } else {
-                discover_lan_server().unwrap_or(configured)
-            };
+            // Try the configured server first, then localhost. This lets one
+            // EXE work on the server and on a workstation after a DHCP change.
+            let candidates = [configured.clone(), DEFAULT_SERVER_URL.to_string()];
+            let url = candidates
+                .into_iter()
+                .find(|candidate| is_healthy_server(candidate))
+                .or_else(discover_lan_server)
+                .unwrap_or(configured);
             let init_script = format!(
                 "window.__MEDICORE_SERVER_URL__ = {};",
                 serde_json::to_string(&url).expect("server URL serializes")

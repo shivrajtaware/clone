@@ -76,9 +76,12 @@ services:
       - "80:80"
     depends_on:
       - backend
+    # These values are embedded into browser JavaScript at build time. The
+    # Docker service name "backend" is not resolvable from a client browser;
+    # nginx proxies both paths to the backend on the same public origin.
     environment:
-      VITE_API_URL: http://backend:5000/api
-      VITE_SOCKET_URL: http://backend:5000
+      VITE_API_URL: /api
+      VITE_SOCKET_URL: ""
     networks:
       - medicore_network
     security_opt:

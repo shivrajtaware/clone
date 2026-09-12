@@ -99,6 +99,11 @@ if (
   maxAge: 86400,
 }));
 
+// Parse request bodies before the auth limiter so its account-aware key can
+// use the submitted email address.
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
 // ── Rate Limiting ─────────────────────────────────────────────
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -115,9 +120,12 @@ const authRateLimitMax = parsePositiveInt(
 );
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
+  windowMs: parsePositiveInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
   max: authRateLimitMax,
   skip: (req) => isLoopbackIp(req.ip),
+  // A reverse proxy can make every workstation appear to use the same IP.
+  // Keep failed-login counters separate for each account on that IP.
+  keyGenerator: (req) => `${req.ip}|${String(req.body?.email || '').trim().toLowerCase() || 'unknown'}`,
   skipSuccessfulRequests: true,
   message: { success: false, message: 'Too many login attempts. Please try again later.' },
   standardHeaders: true,
@@ -129,8 +137,6 @@ app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/refresh', authLimiter);
 
 // ── Body Parsing & Compression ────────────────────────────────
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(compression());
 app.use(requestHardening);
 app.use(auditRequest);

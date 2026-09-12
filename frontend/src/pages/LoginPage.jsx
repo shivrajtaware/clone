@@ -19,7 +19,10 @@ export default function LoginPage() {
       toast.success(`Welcome back, ${user.first_name}!`)
       navigate(user.role === 'SUPER_ADMIN' ? '/superadmin' : '/')
     } catch (err) {
-      toast.error(err.response?.data?.message || err.message || 'Login failed. Check credentials.')
+      const details = err.response?.data?.errors
+        ?.map(error => `${error.field}: ${error.message}`)
+        .join(', ')
+      toast.error(details || err.response?.data?.message || err.message || 'Login failed. Check credentials.')
     } finally {
       setLoading(false)
     }
@@ -95,7 +98,7 @@ export default function LoginPage() {
                   type={showPass ? 'text' : 'password'}
                   className="input pr-10"
                   placeholder="Enter your password"
-                  {...register('password', { required: 'Password is required', minLength: { value: 6, message: 'Min 6 characters' } })}
+                  {...register('password', { required: 'Password is required', minLength: { value: 8, message: 'Min 8 characters' } })}
                 />
                 <button type="button" className="btn-ghost absolute right-2 top-1/2 !min-h-0 -translate-y-1/2 !p-1.5" onClick={() => setShowPass(v => !v)} aria-label={showPass ? 'Hide password' : 'Show password'}>
                   {showPass ? <EyeOff size={16} /> : <Eye size={16} />}

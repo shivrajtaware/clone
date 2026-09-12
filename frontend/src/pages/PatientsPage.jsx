@@ -141,7 +141,12 @@ export default function PatientsPage() {
       setShowModal(false)
       reset()
     },
-    onError: (e) => toast.error(e.response?.data?.message || 'Registration failed'),
+    onError: (e) => {
+      const details = e.response?.data?.errors
+        ?.map(error => `${error.field}: ${error.message}`)
+        .join(', ')
+      toast.error(details || e.response?.data?.message || 'Registration failed')
+    },
   })
 
   const patients = data?.data || []

@@ -3,7 +3,7 @@ const router = require('express').Router();
 const auth = require('../middleware/auth');
 const { prisma } = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
-const { badRequest, resolvePatientId, sanitizeModelInput, toFloat, toInt } = require('../utils/prismaInput');
+const { badRequest, resolvePatientId, sanitizeModelInput, toDate, toFloat, toInt } = require('../utils/prismaInput');
 router.use(auth);
 
 const FEE_TRIGGERS = [
@@ -50,6 +50,111 @@ const DEFAULT_SERVICE_FEES = [
 const VALID_TRIGGERS = new Set(FEE_TRIGGERS.map(t => t.code));
 const PAYMENT_MODES = new Set(['CASH', 'CARD', 'UPI', 'NET_BANKING', 'INSURANCE_CASHLESS', 'CORPORATE_CREDIT', 'CHEQUE', 'ONLINE']);
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+const nextAutomaticBillNo = async (db, hospitalId) => {
+  const bills = await db.bill.findMany({ where: { hospital_id: hospitalId }, select: { bill_no: true } });
+  const maxNumber = bills.reduce((max, bill) => {
+    if (!/^\d+$/.test(String(bill.bill_no || ''))) return max;
+    return Math.max(max, Number(bill.bill_no));
+  }, 0);
+  let next = Math.max(1, maxNumber + 1);
+  while (await db.bill.findUnique({ where: { bill_no: String(next) }, select: { id: true } })) next += 1;
+  return String(next);
+};
+
+const manualMedicineName = (item) => String(item.medicine_name || item.item_name || item.description || '').trim();
+
+const normalizeManualMedicineItems = async (tx, hospitalId, rawItems = []) => {
+  const rows = [];
+  const stockMovements = [];
+
+  for (const raw of rawItems) {
+    const medicineName = manualMedicineName(raw);
+    if (!medicineName) continue;
+
+    const quantity = toFloat(raw.quantity ?? raw.qty ?? 0, 'medicine quantity');
+    if (quantity <= 0) badRequest(`Quantity must be greater than zero for ${medicineName}`);
+    const itemId = String(raw.item_id || '').trim();
+    const quantityUnit = String(raw.quantity_unit || 'LOOSE').toUpperCase() === 'PACK' ? 'PACK' : 'LOOSE';
+
+    if (!itemId) {
+      const saleRate = toFloat(raw.sale_rate ?? raw.unit_price ?? 0, `${medicineName} sale rate`);
+      if (saleRate <= 0) badRequest(`Sale rate must be greater than zero for ${medicineName}`);
+      const mrp = raw.mrp === '' || raw.mrp === undefined || raw.mrp === null ? null : toFloat(raw.mrp, `${medicineName} MRP`);
+      if (mrp !== null && mrp < saleRate) badRequest(`${medicineName} sale rate cannot exceed MRP`);
+      rows.push({
+        category: 'Pharmacy', description: medicineName, quantity, unit_price: saleRate, total: quantity * saleRate,
+        item_id: null, company_name: String(raw.company_name || '').trim() || null, quantity_unit: quantityUnit, pack: String(raw.pack || '').trim() || null, batch_no: String(raw.batch_no || raw.batch || '').trim() || null,
+        expiry_date: raw.expiry_date || raw.exp ? toDate(raw.expiry_date || raw.exp, `${medicineName} expiry`) : null,
+        mrp, sale_rate: saleRate,
+      });
+      continue;
+    }
+
+    const item = await tx.pharmacyItem.findFirst({
+      where: { id: itemId, hospital_id: hospitalId },
+      include: { batches: { where: { quantity_rem: { gt: 0 }, expiry_date: { gte: new Date() } }, orderBy: [{ expiry_date: 'asc' }, { created_at: 'asc' }] } },
+    });
+    if (!item) badRequest(`Medicine not found in this hospital inventory: ${medicineName}`);
+
+    const unitsPerPack = Number(item.units_per_pack || 1);
+    const baseQuantity = quantityUnit === 'PACK' ? quantity * unitsPerPack : quantity;
+    const requestedBatch = String(raw.batch_no || raw.batch || '').trim();
+    const batch = (requestedBatch ? item.batches.find(candidate => candidate.batch_no === requestedBatch) : item.batches[0]);
+    if (!batch) badRequest(`${medicineName} has no usable batch available`);
+    if (Number(batch.quantity_rem || 0) < baseQuantity) badRequest(`Insufficient stock for ${medicineName} in batch ${batch.batch_no}`);
+
+    const defaultMrp = Number(batch.mrp || 0) / (quantityUnit === 'PACK' ? 1 : unitsPerPack);
+    const defaultSaleRate = Number(batch.selling_price || batch.mrp || 0) / (quantityUnit === 'PACK' ? 1 : unitsPerPack);
+    const mrp = raw.mrp === '' || raw.mrp === undefined || raw.mrp === null ? defaultMrp : toFloat(raw.mrp, `${medicineName} MRP`);
+    const saleRate = raw.sale_rate === '' || raw.sale_rate === undefined || raw.sale_rate === null
+      ? defaultSaleRate
+      : toFloat(raw.sale_rate, `${medicineName} sale rate`);
+    if (mrp <= 0 || saleRate <= 0) badRequest(`MRP and sale rate are required for ${medicineName}`);
+    if (saleRate > mrp) badRequest(`${medicineName} sale rate cannot exceed MRP`);
+
+    rows.push({
+      category: 'Pharmacy', description: medicineName, quantity, unit_price: saleRate, total: quantity * saleRate,
+      item_id: item.id, company_name: String(raw.company_name || '').trim() || null, quantity_unit: quantityUnit,
+      pack: String(raw.pack || `${unitsPerPack} ${item.unit || 'units'} / ${item.pack_unit || 'pack'}`).trim(),
+      batch_no: batch.batch_no, expiry_date: batch.expiry_date, mrp, sale_rate: saleRate,
+    });
+    stockMovements.push({ item_id: item.id, batch_no: batch.batch_no, quantity: baseQuantity, unit_price: saleRate });
+  }
+
+  return { rows, stockMovements };
+};
+
+const normalizeEditableBillItems = (rawItems = []) => rawItems.reduce((rows, raw) => {
+  const description = manualMedicineName(raw);
+  if (!description) return rows;
+
+  const quantity = toFloat(raw.quantity ?? raw.qty ?? 1, 'quantity');
+  if (quantity <= 0) badRequest('Quantity must be greater than zero');
+  const unitPrice = toFloat(raw.sale_rate ?? raw.unit_price ?? 0, description + ' rate');
+  if (unitPrice < 0) badRequest(description + ' rate cannot be negative');
+  const mrp = raw.mrp === '' || raw.mrp === undefined || raw.mrp === null ? null : toFloat(raw.mrp, description + ' MRP');
+  if (mrp !== null && mrp < unitPrice) badRequest(description + ' rate cannot exceed MRP');
+  const expiryValue = raw.expiry_date || raw.exp;
+  const quantityUnit = String(raw.quantity_unit || 'LOOSE').toUpperCase() === 'PACK' ? 'PACK' : 'LOOSE';
+
+  rows.push({
+    category: raw.category || 'Other',
+    description,
+    quantity,
+    unit_price: unitPrice,
+    total: quantity * unitPrice,
+    item_id: String(raw.item_id || '').trim() || null,
+    company_name: String(raw.company_name || '').trim() || null,
+    quantity_unit: quantityUnit,
+    pack: String(raw.pack || '').trim() || null,
+    batch_no: String(raw.batch_no || raw.batch || '').trim() || null,
+    expiry_date: expiryValue ? toDate(expiryValue, description + ' expiry') : null,
+    mrp,
+    sale_rate: raw.sale_rate === '' || raw.sale_rate === undefined || raw.sale_rate === null ? null : unitPrice,
+  });
+  return rows;
+}, []);
 
 const normalizeFee = (body) => {
   const name = String(body.name || '').trim();
@@ -361,15 +466,98 @@ router.get('/bills/:id', async (req, res) => {
   res.json({ success: true, data: bill });
 });
 
+router.put('/bills/:id', async (req, res) => {
+  const existing = await prisma.bill.findFirst({
+    where: { id: req.params.id, hospital_id: req.hospitalId },
+    include: { items: true, payments: true },
+  });
+  if (!existing) return res.status(404).json({ success: false, message: 'Bill not found' });
+  if (existing.status === 'CANCELLED' || existing.status === 'REFUNDED') badRequest('Cancelled or refunded bills cannot be edited');
+
+  const requestedBillNo = String(req.body.bill_no || existing.bill_no).trim();
+  if (!requestedBillNo) badRequest('Bill number is required');
+  if (requestedBillNo.length > 100) badRequest('Bill number cannot exceed 100 characters');
+  if (requestedBillNo !== existing.bill_no) {
+    const duplicateBill = await prisma.bill.findUnique({ where: { bill_no: requestedBillNo }, select: { id: true } });
+    if (duplicateBill) badRequest('Bill number already exists: ' + requestedBillNo);
+  }
+
+  const patientName = String(req.body.patient_name || existing.patient_name || '').trim();
+  if (!patientName) badRequest('Patient name is required');
+  const rawItems = [
+    ...(Array.isArray(req.body.items) ? req.body.items : []),
+    ...(Array.isArray(req.body.medicine_items) ? req.body.medicine_items.map(item => ({ ...item, category: 'Pharmacy', description: manualMedicineName(item) })) : []),
+  ];
+  const items = normalizeEditableBillItems(rawItems);
+  if (!items.length) badRequest('Add at least one bill item description');
+
+  const billData = sanitizeModelInput('Bill', req.body, {
+    exclude: ['id', 'hospital_id', 'bill_no', 'patient_id', 'admission_id', 'status', 'subtotal', 'discount_amt', 'tax_amt', 'total_amt', 'paid_amt', 'due_amt', 'created_at', 'updated_at'],
+  });
+  const billDate = req.body.bill_date ? toDate(req.body.bill_date, 'invoice date') : existing.bill_date;
+  if (!billDate) badRequest('Invoice date and time are required');
+  const discountPct = req.body.discount_pct === undefined ? Number(existing.discount_pct || 0) : toFloat(req.body.discount_pct, 'discount percentage');
+  if (discountPct < 0 || discountPct > 100) badRequest('Discount percentage must be between 0 and 100');
+  const subtotal = items.reduce((sum, item) => sum + item.total, 0);
+  const discountAmt = subtotal * (discountPct / 100);
+  const totalAmt = subtotal - discountAmt;
+  const paidAmt = Number(existing.paid_amt || 0);
+  if (totalAmt < paidAmt) badRequest('Bill total cannot be less than the amount already paid');
+  const dueAmt = Math.max(0, totalAmt - paidAmt);
+  const status = paidAmt >= totalAmt ? 'PAID' : paidAmt > 0 ? 'PARTIAL_PAID' : 'GENERATED';
+
+  const updated = await prisma.$transaction(async (tx) => tx.bill.update({
+    where: { id: existing.id },
+    data: {
+      ...billData,
+      bill_no: requestedBillNo,
+      patient_name: patientName,
+      bill_date: billDate,
+      discount_pct: discountPct,
+      subtotal,
+      discount_amt: discountAmt,
+      tax_amt: 0,
+      total_amt: totalAmt,
+      paid_amt: paidAmt,
+      due_amt: dueAmt,
+      status,
+      items: {
+        deleteMany: {},
+        create: items.map(item => ({ id: uuidv4(), ...item })),
+      },
+    },
+    include: { patient: { select: { first_name: true, last_name: true, uhid: true } }, items: true, payments: true },
+  }));
+
+  res.json({ success: true, data: updated, message: 'Bill updated successfully' });
+});
+
 router.post('/bills', async (req, res) => {
   const items = Array.isArray(req.body.items) ? req.body.items : [];
+  const medicineItems = Array.isArray(req.body.medicine_items) ? req.body.medicine_items : [];
 
   const billData = sanitizeModelInput('Bill', req.body, {
     exclude: ['id', 'hospital_id', 'bill_no', 'patient_id', 'status', 'subtotal', 'discount_amt', 'tax_amt', 'total_amt', 'paid_amt', 'due_amt', 'created_at', 'updated_at'],
   });
-  billData.patient_id = await resolvePatientId(prisma, req.hospitalId, req.body.patient_id);
+  const patientReference = String(req.body.patient_id || '').trim();
+  const typedPatientName = String(req.body.patient_name || '').trim();
+  let resolvedPatientId = null;
+  if (patientReference) {
+    try {
+      resolvedPatientId = await resolvePatientId(prisma, req.hospitalId, patientReference);
+    } catch (error) {
+      // A manual bill may be issued against a typed patient name even when
+      // that person has not been registered yet. Preserve the typed name;
+      // registered patients still resolve and remain linked normally.
+      if (!typedPatientName || patientReference !== typedPatientName) throw error;
+    }
+  }
+  if (!resolvedPatientId && !typedPatientName) badRequest('Patient name is required');
+  if (!billData.bill_date) badRequest('Invoice date and time are required');
+  billData.patient_id = resolvedPatientId;
+  billData.patient_name = typedPatientName || null;
   if (!billData.type) badRequest('Bill type is required');
-  if (['IPD_INTERIM', 'IPD_FINAL', 'PACKAGE'].includes(billData.type)) {
+  if (['IPD_INTERIM', 'IPD_FINAL', 'PACKAGE'].includes(billData.type) && billData.patient_id) {
     const admission = await prisma.admission.findFirst({
       where: { hospital_id: req.hospitalId, patient_id: billData.patient_id, ...(req.body.admission_id ? { id: req.body.admission_id } : { status: 'ADMITTED' }) },
       orderBy: { admission_date: 'desc' }, select: { id: true },
@@ -378,7 +566,7 @@ router.post('/bills', async (req, res) => {
     billData.admission_id = admission.id;
   }
 
-  const bill_no = `BILL-${new Date().getFullYear()}-${uuidv4().slice(0, 8).toUpperCase()}`;
+  const bill_no = await nextAutomaticBillNo(prisma, req.hospitalId);
 
   const manualItems = items.filter(item => item.description).map(item => {
     const quantity = item.quantity ? toInt(item.quantity, 'quantity') : 1;
@@ -393,11 +581,11 @@ router.post('/bills', async (req, res) => {
   });
 
   const autoItems = req.body.auto_apply === true || req.body.auto_apply === 'true'
-    ? (await buildAutoBillItems(prisma, req.hospitalId, billData.patient_id)).items
+    ? (billData.patient_id ? (await buildAutoBillItems(prisma, req.hospitalId, billData.patient_id)).items : [])
     : [];
   const billItems = [...autoItems, ...manualItems];
 
-  if (!billItems.length) badRequest('Add at least one bill item description');
+  if (!billItems.length && !medicineItems.some(item => manualMedicineName(item))) badRequest('Add at least one bill item description');
 
   const subtotal = billItems.reduce((sum, item) => sum + item.total, 0);
   const discount_pct = billData.discount_pct || 0;
@@ -410,22 +598,66 @@ router.post('/bills', async (req, res) => {
   const due_amt = Math.max(0, total_amt - paid_amt);
 
   const bill = await prisma.$transaction(async (tx) => {
+    const normalizedMedicine = await normalizeManualMedicineItems(tx, req.hospitalId, medicineItems);
+    const allBillItems = [...billItems, ...normalizedMedicine.rows];
+    if (!allBillItems.length) badRequest('Add at least one bill item description');
+    const subtotal = allBillItems.reduce((sum, item) => sum + item.total, 0);
+    const discount_pct = Number(billData.discount_pct || 0);
+    const discount_amt = subtotal * (discount_pct / 100);
+    const tax_amt = 0;
+    const total_amt = subtotal - discount_amt + tax_amt;
+    const paid_amt = collectNow && billData.payment_mode ? total_amt : 0;
+    const due_amt = Math.max(0, total_amt - paid_amt);
+
+    if (normalizedMedicine.stockMovements.length) {
+      const dispense = await tx.dispense.create({
+        data: {
+          id: uuidv4(),
+          hospital_id: req.hospitalId,
+          dispense_no: `IPD-${new Date().getFullYear()}-${uuidv4().slice(0, 8).toUpperCase()}`,
+          patient_id: billData.patient_id,
+          dispensed_by: req.user.id,
+          notes: `Manual IPD medicine billing${billData.patient_name ? ` · Patient: ${billData.patient_name}` : ''}${billData.doctor_name ? ` · Doctor: ${billData.doctor_name}` : ''}`,
+          items: { create: normalizedMedicine.stockMovements.map(movement => ({ id: uuidv4(), ...movement })) },
+        },
+      });
+      for (const movement of normalizedMedicine.stockMovements) {
+        await tx.pharmacyItem.update({ where: { id: movement.item_id }, data: { current_stock: { decrement: movement.quantity } } });
+        await tx.drugBatch.updateMany({ where: { item_id: movement.item_id, batch_no: movement.batch_no }, data: { quantity_rem: { decrement: movement.quantity } } });
+      }
+      // Keep the stock movement linked to this bill in the audit trail without
+      // introducing a second bill or charging the patient twice.
+      await tx.auditLog.create({
+        data: {
+          id: uuidv4(), hospital_id: req.hospitalId, user_id: req.user.id, module: 'PHARMACY', action: 'MANUAL_IPD_BILL', record_id: dispense.id,
+          new_values: { patient_id: billData.patient_id, doctor_name: billData.doctor_name || null, medicine_items: normalizedMedicine.rows },
+        },
+      });
+    }
+
     const existingIpdBill = billData.admission_id
       ? await tx.bill.findFirst({ where: { hospital_id: req.hospitalId, admission_id: billData.admission_id }, include: { items: true, payments: true, patient: { select: { first_name: true, last_name: true, uhid: true } } } })
       : null;
     if (existingIpdBill) {
       const previousSubtotal = Number(existingIpdBill.subtotal || 0);
-      const addedSubtotal = billItems.reduce((sum, item) => sum + item.total, 0);
+      const addedSubtotal = allBillItems.reduce((sum, item) => sum + item.total, 0);
       const mergedSubtotal = previousSubtotal + addedSubtotal;
       const mergedDiscount = Number(existingIpdBill.discount_amt || 0) + discount_amt;
       const mergedTotal = mergedSubtotal - mergedDiscount;
       const addedPayment = collectNow && billData.payment_mode ? Math.max(0, mergedTotal - Number(existingIpdBill.paid_amt || 0)) : 0;
       if (addedPayment > 0) await tx.payment.create({ data: { id: uuidv4(), bill_id: existingIpdBill.id, amount: addedPayment, mode: billData.payment_mode, reference_no: req.body.payment_reference || null, received_by: req.user.id } });
       return tx.bill.update({ where: { id: existingIpdBill.id }, data: {
-        type: billData.type, subtotal: mergedSubtotal, discount_amt: mergedDiscount, tax_amt: 0, total_amt: mergedTotal,
+        type: billData.type,
+        doctor_name: billData.doctor_name || existingIpdBill.doctor_name,
+        patient_name: billData.patient_name || existingIpdBill.patient_name,
+        patient_address: billData.patient_address || existingIpdBill.patient_address,
+        patient_mobile: billData.patient_mobile || existingIpdBill.patient_mobile,
+        bill_date: existingIpdBill.bill_date,
+        admission_date: billData.admission_date || existingIpdBill.admission_date,
+        subtotal: mergedSubtotal, discount_amt: mergedDiscount, tax_amt: 0, total_amt: mergedTotal,
         paid_amt: Number(existingIpdBill.paid_amt || 0) + addedPayment, due_amt: Math.max(0, mergedTotal - Number(existingIpdBill.paid_amt || 0) - addedPayment),
         status: addedPayment >= mergedTotal - Number(existingIpdBill.paid_amt || 0) ? 'PAID' : 'GENERATED',
-        items: { create: billItems.map(item => ({ id: uuidv4(), ...item })) },
+        items: { create: allBillItems.map(item => ({ id: uuidv4(), ...item })) },
       }, include: { patient: { select: { first_name: true, last_name: true, uhid: true } }, items: true, payments: true } });
     }
     const created = await tx.bill.create({
@@ -433,7 +665,7 @@ router.post('/bills', async (req, res) => {
         id: uuidv4(), hospital_id: req.hospitalId, bill_no, ...billData,
         subtotal, discount_pct, discount_amt, tax_amt, total_amt, paid_amt, due_amt,
         status: paid_amt >= total_amt ? 'PAID' : 'GENERATED',
-        items: { create: billItems.map(item => ({ id: uuidv4(), ...item })) },
+        items: { create: allBillItems.map(item => ({ id: uuidv4(), ...item })) },
       },
       include: { patient: { select: { first_name: true, last_name: true, uhid: true } }, items: true, payments: true },
     });

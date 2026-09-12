@@ -255,7 +255,7 @@ export default function PharmacyPage() {
   const [importMode, setImportMode] = useState('skip')
   const [selectedPrescription, setSelectedPrescription] = useState(null)
   const [dispenseRows, setDispenseRows] = useState([])
-  const [rxPayment, setRxPayment] = useState({ payment_method: 'CASH', payment_reference: '' })
+  const [rxPayment, setRxPayment] = useState({ payment_method: 'CASH', payment_reference: '', discount_pct: 0 })
   const [selectedItem, setSelectedItem] = useState(null)
   const [selectedBatch, setSelectedBatch] = useState(null)
   const [receipt, setReceipt] = useState(null)
@@ -337,9 +337,9 @@ export default function PharmacyPage() {
   const addMut = useMutation({
     mutationFn: async ({ opening_stock, ...medicine }) => {
       if (!String(medicine.generic_name || '').trim()) medicine.generic_name = String(medicine.brand_name || '').trim()
-      const created = await api.post('/pharmacy/inventory', medicine)
-      await api.post(`/pharmacy/inventory/${created.data.data.id}/batch`, opening_stock)
-      return created
+      // The API creates the medicine and opening batch in one database
+      // transaction, so a failed batch validation cannot leave an orphan SKU.
+      return api.post('/pharmacy/inventory', { ...medicine, opening_stock })
     },
     onSuccess: async () => {
       // Clear a previous inventory search/status before refetching; otherwise
@@ -564,9 +564,13 @@ export default function PharmacyPage() {
     return unitsPerPack > 1 ? ` x${qty} ${packUnit} (${qty * unitsPerPack} ${looseUnit})` : ` x${qty} ${packUnit}`
   }
 
+  const usableBatches = (item) => (item?.batches || []).filter(batch => (
+    Number(batch.quantity_rem || 0) > 0 && new Date(batch.expiry_date) >= new Date()
+  ))
+
   const buildDispenseRows = (rx) => (rx.items || []).map(line => {
     const match = findPrescriptionStockMatch(line)
-    const batch = match?.batches?.[0]
+    const batch = usableBatches(match)[0]
     return {
       rx_item_id: line.id,
       drug_name: line.drug_name,
@@ -577,6 +581,7 @@ export default function PharmacyPage() {
       route: line.route,
       instructions: line.instructions,
       item_id: match?.id || '',
+      batch_no: batch?.batch_no || '',
       quantity: Number.parseInt(line.quantity || 1, 10),
       quantity_unit: line.quantity_unit === 'PACK' ? 'PACK' : 'LOOSE',
       item_name: line.drug_name,
@@ -585,21 +590,17 @@ export default function PharmacyPage() {
     }
   })
 
-  const usableBatches = (item) => (item?.batches || []).filter(batch => (
-    Number(batch.quantity_rem || 0) > 0 && new Date(batch.expiry_date) >= new Date()
-  ))
-
   const openDispenseReview = (rx) => {
     setSelectedPrescription(rx)
     setDispenseRows(buildDispenseRows(rx))
-    setRxPayment({ payment_method: 'CASH', payment_reference: '' })
+    setRxPayment({ payment_method: 'CASH', payment_reference: '', discount_pct: 0 })
   }
 
   const updateDispenseRow = (index, updates) => setDispenseRows(prev => prev.map((row, i) => i === index ? { ...row, ...updates } : row))
   const closeDispenseReview = () => {
     setSelectedPrescription(null)
     setDispenseRows([])
-    setRxPayment({ payment_method: 'CASH', payment_reference: '' })
+    setRxPayment({ payment_method: 'CASH', payment_reference: '', discount_pct: 0 })
   }
 
   const printOutsidePrescription = () => {
@@ -623,9 +624,7 @@ export default function PharmacyPage() {
       const match = stockItemsForDispense.find(item => item.id === row.item_id)
       if (!match) {
         const unitPrice = Number(row.unit_price)
-        const gstPct = Number(row.gst_pct)
         if (!Number.isFinite(unitPrice) || unitPrice <= 0) missing.push(`${row.drug_name} (selling price)`)
-        if (row.gst_pct === '' || !Number.isFinite(gstPct) || gstPct < 0 || gstPct > 100) missing.push(`${row.drug_name} (GST)`)
         if (missing.length) return null
         return {
           rx_item_id: row.rx_item_id,
@@ -633,7 +632,7 @@ export default function PharmacyPage() {
           quantity: Number(row.quantity || 1),
           quantity_unit: 'LOOSE',
           unit_price: unitPrice,
-          gst_pct: gstPct,
+          gst_pct: 0,
           dose: row.dose,
           frequency: row.frequency,
           duration: row.duration,
@@ -644,8 +643,13 @@ export default function PharmacyPage() {
       const quantity = Number.parseInt(row.quantity || 1, 10)
       const quantityUnit = row.quantity_unit === 'PACK' ? 'PACK' : 'LOOSE'
       const baseQuantity = baseQty(quantity, quantityUnit, match)
-      if (match.current_stock < baseQuantity) {
-        lowStock.push(`${match.generic_name} needs ${stockText(baseQuantity, match)}, has ${stockText(match.current_stock, match)}`)
+      const batch = usableBatches(match).find(candidate => candidate.batch_no === row.batch_no)
+      if (!batch) {
+        lowStock.push(`${match.generic_name} has no selected usable batch`)
+        return null
+      }
+      if (match.current_stock < baseQuantity || Number(batch.quantity_rem || 0) < baseQuantity) {
+        lowStock.push(`${match.generic_name} batch ${batch.batch_no} needs ${stockText(baseQuantity, match)}, has ${stockText(batch.quantity_rem, match)}`)
         return null
       }
       return {
@@ -655,7 +659,8 @@ export default function PharmacyPage() {
         quantity,
         quantity_unit: quantityUnit,
         unit_price: Number(row.unit_price || 0),
-        gst_pct: Number(row.gst_pct || 0),
+        batch_no: row.batch_no,
+        gst_pct: 0,
         dose: row.dose,
         frequency: row.frequency,
         duration: row.duration,
@@ -673,42 +678,53 @@ export default function PharmacyPage() {
       items: lines,
       payment_method: rxPayment.payment_method,
       payment_reference: rxPayment.payment_reference,
-      gst: { tax_mode: 'INCLUSIVE' },
+      gst: { tax_mode: 'INCLUSIVE', include_gst: false, discount_pct: Number(rxPayment.discount_pct || 0) },
     })
   }
 
   const rxBillPreview = useMemo(() => {
     const rows = dispenseRows.map(row => {
       const item = stockItemsForDispense.find(i => i.id === row.item_id)
-      const batch = item?.batches?.[0]
+      const batch = usableBatches(item).find(candidate => candidate.batch_no === row.batch_no)
       if (!item) {
         const quantity = Number(row.quantity || 1)
         const rate = Number(row.unit_price || 0)
-        const gstPct = Number(row.gst_pct || 0)
         if (!rate && !row.unit_price) return null
         const gross = quantity * rate
-        const taxable = gross / (1 + gstPct / 100)
-        return { gross, tax: gross - taxable }
+        return { gross }
       }
       if (!batch) return null
       const quantity = baseQty(row.quantity, row.quantity_unit, item)
       const rate = Number(batch.selling_price || batch.mrp || 0) / packSize(item)
       const gross = quantity * rate
-      const gstPct = Number(batch.gst_pct || 0)
-      const taxable = gross / (1 + gstPct / 100)
-      return { gross, tax: gross - taxable }
+      return { gross }
     }).filter(Boolean)
+    const subtotal = rows.reduce((sum, row) => sum + row.gross, 0)
+    const discountPct = Math.min(100, Math.max(0, Number(rxPayment.discount_pct || 0)))
+    const discount = subtotal * discountPct / 100
     return {
-      subtotal: rows.reduce((sum, row) => sum + row.gross, 0),
-      tax: rows.reduce((sum, row) => sum + row.tax, 0),
+      subtotal,
+      discount,
+      payable: Math.max(0, subtotal - discount),
     }
-  }, [dispenseRows, stockItemsForDispense])
+  }, [dispenseRows, stockItemsForDispense, rxPayment.discount_pct])
 
-  const dispenseReady = dispenseRows.length > 0 && dispenseRows.every(row => {
-    const item = stockItemsForDispense.find(i => i.id === row.item_id)
-    if (!item) return Number(row.unit_price) > 0 && row.unit_price !== '' && row.gst_pct !== '' && Number(row.gst_pct) >= 0 && Number(row.gst_pct) <= 100
-    return item.current_stock >= baseQty(row.quantity, row.quantity_unit, item)
-  })
+  const dispenseIssues = useMemo(() => {
+    const issues = dispenseRows.flatMap(row => {
+      const item = stockItemsForDispense.find(i => i.id === row.item_id)
+      if (!item) return Number(row.unit_price) > 0 && row.unit_price !== '' ? [] : [`${row.drug_name}: enter selling price`]
+      const batch = usableBatches(item).find(candidate => candidate.batch_no === row.batch_no)
+      if (!batch) return [`${row.drug_name}: select a usable batch`]
+      const required = baseQty(row.quantity, row.quantity_unit, item)
+      if (item.current_stock < required || Number(batch.quantity_rem || 0) < required) return [`${row.drug_name}: selected batch has insufficient stock`]
+      return []
+    })
+    const discountPct = Number(rxPayment.discount_pct || 0)
+    return Number.isFinite(discountPct) && discountPct >= 0 && discountPct <= 100
+      ? issues
+      : [...issues, 'discount must be between 0 and 100%']
+  }, [dispenseRows, stockItemsForDispense, rxPayment.discount_pct])
+  const dispenseReady = dispenseRows.length > 0 && dispenseIssues.length === 0 && Boolean(rxPayment.payment_method)
 
   const addToCart = (item) => {
     const batch = (item.batches || [])[0]
@@ -764,6 +780,7 @@ export default function PharmacyPage() {
   }, [posCart, walkInCustomer.discount_pct, walkInCustomer.received_amt])
 
   const completeWalkInSale = () => {
+    if (!walkInCustomer.name.trim()) return toast.error('Customer name is required')
     if (!posCart.length) return toast.error('Add medicines to the bill')
     const over = posCart.find(row => baseQty(row.quantity, row.quantity_unit, row) > row.max_qty)
     if (over) return toast.error(`${over.name} exceeds available stock (${stockText(over.max_qty, over)})`)
@@ -937,7 +954,7 @@ export default function PharmacyPage() {
               <Badge status="POS" label={`${posCart.length} items`} />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
-              <input className="input" placeholder="Customer name" value={walkInCustomer.name} onChange={e => setWalkInCustomer(v => ({ ...v, name: e.target.value }))} />
+              <label className="space-y-1"><span className="text-xs text-slate-300">Customer name <span className="text-brand-red">*</span></span><input required className="input" placeholder="Customer name" value={walkInCustomer.name} onChange={e => setWalkInCustomer(v => ({ ...v, name: e.target.value }))} /></label>
               <input className="input" placeholder="Phone" value={walkInCustomer.phone} onChange={e => setWalkInCustomer(v => ({ ...v, phone: e.target.value }))} />
               <input className="input" placeholder="GSTIN optional" value={walkInCustomer.gstin} onChange={e => setWalkInCustomer(v => ({ ...v, gstin: e.target.value }))} />
               <select className="select" value={walkInCustomer.payment_method} onChange={e => setWalkInCustomer(v => ({ ...v, payment_method: e.target.value }))}>
@@ -977,7 +994,7 @@ export default function PharmacyPage() {
                 <div className="flex justify-between text-xs"><span className="text-slate-400">{cartTotals.change > 0 ? 'Change due' : 'Balance'}</span><span className={cartTotals.change > 0 ? 'text-brand-green' : 'text-brand-amber'}>{money(cartTotals.change || cartTotals.balance)}</span></div>
               )}
             </div>
-            <button className="btn-primary w-full mt-3" disabled={walkInSaleMut.isPending || !posCart.length} onClick={completeWalkInSale}><ReceiptIndianRupee size={16} /> {walkInSaleMut.isPending ? 'Billing...' : 'Complete Walk-in Sale'}</button>
+            <button className="btn-primary w-full mt-3" disabled={walkInSaleMut.isPending || !posCart.length || !walkInCustomer.name.trim()} onClick={completeWalkInSale}><ReceiptIndianRupee size={16} /> {walkInSaleMut.isPending ? 'Billing...' : 'Complete Walk-in Sale'}</button>
           </div>
         </div>
       )}
@@ -1019,7 +1036,8 @@ export default function PharmacyPage() {
             {dispenseRows.map((row, index) => {
               const item = stockItemsForDispense.find(i => i.id === row.item_id)
               const baseQuantity = item ? baseQty(row.quantity, row.quantity_unit, item) : 0
-              const hasStock = item && item.current_stock >= baseQuantity
+              const selectedBatch = item ? usableBatches(item).find(batch => batch.batch_no === row.batch_no) : null
+              const hasStock = item && selectedBatch && item.current_stock >= baseQuantity && Number(selectedBatch.quantity_rem || 0) >= baseQuantity
               return (
                 <div key={row.rx_item_id || index} className="rounded-lg border border-default bg-navy-800 p-3">
                   <div className="mb-2 flex flex-col gap-1 md:flex-row md:items-start md:justify-between">
@@ -1027,18 +1045,19 @@ export default function PharmacyPage() {
                       <div className="text-xs font-semibold text-white">{row.drug_name} {row.strength || ''}</div>
                       <div className="text-[11px] text-slate-400">{row.dose || '-'} | {row.frequency || '-'} | {row.duration || '-'}{row.instructions ? ` | ${row.instructions}` : ''}</div>
                     </div>
-                    <span className={item ? (hasStock ? 'badge-green' : 'badge-red') : 'badge-yellow'}>{item ? (hasStock ? 'Ready' : 'Low stock') : 'Unregistered — price/GST required'}</span>
+                    <span className={item ? (hasStock ? 'badge-green' : 'badge-red') : 'badge-yellow'}>{item ? (hasStock ? 'Ready' : 'Low stock') : 'Unregistered — price required'}</span>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
                     <div className="md:col-span-6">
                       <label className="label">Inventory Medicine</label>
                       <select className="select" value={row.item_id} onChange={e => {
                         const selected = stockItemsForDispense.find(stock => stock.id === e.target.value)
-                        const batch = selected?.batches?.[0]
+                        const batch = usableBatches(selected)[0]
                         updateDispenseRow(index, {
                           item_id: e.target.value,
+                          batch_no: usableBatches(selected)[0]?.batch_no || '',
                           unit_price: selected && batch ? Number(batch.selling_price || batch.mrp || 0) / packSize(selected) : '',
-                          gst_pct: selected && batch ? Number(batch.gst_pct || 0) : '',
+                          gst_pct: 0,
                         })
                       }}>
                         <option value="">Select stock item</option>
@@ -1056,23 +1075,29 @@ export default function PharmacyPage() {
                         <option value="PACK">{item ? inferredPackUnit(item) : 'Pack'}</option>
                       </select>
                     </div>
+                    {item && <div className="md:col-span-3">
+                      <label className="label">Batch to dispense</label>
+                      <select className="select" value={row.batch_no || ''} onChange={e => {
+                        const batch = usableBatches(item).find(candidate => candidate.batch_no === e.target.value)
+                        updateDispenseRow(index, {
+                          batch_no: e.target.value,
+                          unit_price: batch ? Number(batch.selling_price || batch.mrp || 0) / packSize(item) : '',
+                        })
+                      }}>
+                        <option value="">Select batch</option>
+                        {usableBatches(item).map(batch => <option key={batch.id} value={batch.batch_no}>{batch.batch_no} | Exp {fmt.date(batch.expiry_date)} | {stockText(batch.quantity_rem, item)}</option>)}
+                      </select>
+                    </div>}
                     {!item && <>
                       <div className="md:col-span-2">
                         <label className="label">Selling price</label>
                         <input type="number" min="0" step="0.01" className="input" value={row.unit_price} placeholder="Enter price" onChange={e => updateDispenseRow(index, { unit_price: e.target.value })} />
                       </div>
-                      <div className="md:col-span-2">
-                        <label className="label">GST %</label>
-                        <select className="select" value={row.gst_pct} onChange={e => updateDispenseRow(index, { gst_pct: e.target.value })}>
-                          <option value="">Select GST</option>
-                          {gstSlabs.map(rate => <option key={rate} value={rate}>{rate}%</option>)}
-                        </select>
-                      </div>
                     </>}
                     <div className="md:col-span-2">
                       <label className="label">Stock Impact</label>
                       <div className={`rounded-lg border px-3 py-2 text-xs ${hasStock ? 'border-brand-green text-brand-green' : 'border-brand-red text-brand-red'}`}>
-                        {item ? `${stockText(baseQuantity, item)} of ${stockText(item.current_stock, item)}` : 'No inventory stock — bill only'}
+                         {item ? (selectedBatch ? `${stockText(baseQuantity, item)} of ${stockText(selectedBatch.quantity_rem, item)} in batch` : 'Select a usable batch') : 'No inventory stock — bill only'}
                       </div>
                     </div>
                   </div>
@@ -1080,17 +1105,14 @@ export default function PharmacyPage() {
                      <div className="mt-2 space-y-1 text-[11px] text-slate-400">
                        <span>Pack: 1 {inferredPackUnit(item)} = {packSize(item)} {inferredLooseUnit(item)}</span>
                        <span className="ml-2">Total loose issue: {baseQuantity} {inferredLooseUnit(item)}</span>
-                       <span className="ml-2">GST will come from the allocated batch.</span>
+                       <span className="ml-2">Prescription bills do not include GST.</span>
                        <div className="rounded border border-cyan/20 bg-navy-900 px-2 py-1 text-cyan">
                          <strong>Batch for billing:</strong>{' '}
-                         {usableBatches(item).length
-                           ? usableBatches(item).map(batch => `${batch.batch_no} (${stockText(batch.quantity_rem, item)})`).join(' → ')
-                           : 'No usable batch available'}
-                         {usableBatches(item).length > 1 && <span className="ml-1 text-slate-400">(FEFO order; final allocated batches appear on the bill)</span>}
+                         {selectedBatch ? `${selectedBatch.batch_no} (${stockText(selectedBatch.quantity_rem, item)})` : 'No usable batch selected'}
                        </div>
                      </div>
                    )}
-                   {!item && <div className="mt-2 rounded border border-amber-400/30 bg-amber-400/10 px-2 py-1 text-[11px] text-amber-200">This medicine is not yet in pharmacy inventory. Enter selling price and GST; it will be billed without stock deduction.</div>}
+                    {!item && <div className="mt-2 rounded border border-amber-400/30 bg-amber-400/10 px-2 py-1 text-[11px] text-amber-200">This medicine is not yet in pharmacy inventory. Enter only the selling price; it will be billed without stock deduction or GST.</div>}
                 </div>
               )
             })}
@@ -1104,26 +1126,36 @@ export default function PharmacyPage() {
               </div>
               <div className="text-right text-xs">
                 <div className="text-slate-400">Estimated payable</div>
-                <div className="text-sm font-semibold text-white">{money(rxBillPreview.subtotal)}</div>
+                <div className="text-sm font-semibold text-white">{money(rxBillPreview.payable)}</div>
               </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
               <div>
                 <label className="label">Payment mode</label>
                 <select className="select" value={rxPayment.payment_method} onChange={e => setRxPayment(v => ({ ...v, payment_method: e.target.value }))}>
                   {paymentModes.map(mode => <option key={mode} value={mode}>{mode.replace(/_/g, ' ')}</option>)}
                 </select>
               </div>
-              <div className="md:col-span-2">
+              <div>
                 <label className="label">Reference / transaction no.</label>
                 <input className="input" placeholder="Optional for cash" value={rxPayment.payment_reference} onChange={e => setRxPayment(v => ({ ...v, payment_reference: e.target.value }))} />
               </div>
+              <div>
+                <label className="label">Discount %</label>
+                <input type="number" min="0" max="100" step="0.01" className="input" value={rxPayment.discount_pct} onChange={e => setRxPayment(v => ({ ...v, discount_pct: e.target.value }))} />
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+              <div><span className="text-slate-400">Subtotal</span><div className="font-semibold text-white">{money(rxBillPreview.subtotal)}</div></div>
+              <div><span className="text-slate-400">Discount</span><div className="font-semibold text-amber-300">{money(rxBillPreview.discount)}</div></div>
+              <div><span className="text-slate-400">Payable (no GST)</span><div className="font-semibold text-cyan">{money(rxBillPreview.payable)}</div></div>
             </div>
           </div>
 
+          {!dispenseReady && <div className="rounded border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">Confirm &amp; Bill is waiting for: {dispenseIssues.join(' • ') || 'a payment mode'}</div>}
           <div className="flex gap-2">
             <button className="btn flex-1" disabled={outsidePrescriptionMut.isPending || dispenseMut.isPending} onClick={printOutsidePrescription}><Printer size={16} /> Patient buying outside — Print prescription</button>
-            <button className="btn-primary flex-1" disabled={dispenseMut.isPending || !dispenseReady} onClick={dispensePrescription}><ReceiptIndianRupee size={16} /> {dispenseMut.isPending ? 'Billing...' : 'Confirm & Bill'}</button>
+            <button className={`btn-primary flex-1 ${dispenseReady && !dispenseMut.isPending ? 'shadow-lg shadow-cyan/20' : ''}`} disabled={dispenseMut.isPending || !dispenseReady} onClick={dispensePrescription}><ReceiptIndianRupee size={16} /> {dispenseMut.isPending ? 'Billing...' : 'Confirm & Bill'}</button>
             <button className="btn flex-1" disabled={dispenseMut.isPending} onClick={closeDispenseReview}>Cancel</button>
           </div>
         </div>
@@ -1587,6 +1619,7 @@ const invoiceSalePrice = (row) => Number(row.sale_price ?? invoiceLineTotal(row)
 
 function buildInvoiceHtml(receipt) {
   const invoice = receipt.invoice || {}
+  const noGst = invoice.gst_included === false || receipt.type === 'Prescription Sale'
   const hospital = receipt.hospital || {}
   const customerName = receipt.patient ? `${receipt.patient.first_name} ${receipt.patient.last_name}` : receipt.customer?.name || 'Walk-in customer'
   const customerMeta = receipt.patient?.uhid || receipt.customer?.phone || '-'
@@ -1595,6 +1628,10 @@ function buildInvoiceHtml(receipt) {
   const itemRows = rows.map((i, index) => {
     const cgstRate = Number(i.gst_pct || 0) / 2
     const sgstRate = Number(i.gst_pct || 0) / 2
+    const taxCells = noGst ? '' : `
+         <td class="num">${escapeHtml(money(i.taxable_value || 0))}</td>
+         <td class="num">${escapeHtml(money(i.cgst || 0))}<div class="muted">${escapeHtml(cgstRate)}%</div></td>
+         <td class="num">${escapeHtml(money(i.sgst || 0))}<div class="muted">${escapeHtml(sgstRate)}%</div></td>`
     return `
       <tr>
         <td>${index + 1}</td>
@@ -1602,9 +1639,7 @@ function buildInvoiceHtml(receipt) {
         <td class="num">${escapeHtml(money(invoiceMrpTotal(i)))}</td>
         <td class="num">${escapeHtml(money(invoiceDiscount(i)))}</td>
         <td class="num">${escapeHtml(money(invoiceSalePrice(i)))}</td>
-        <td class="num">${escapeHtml(money(i.taxable_value || 0))}</td>
-        <td class="num">${escapeHtml(money(i.cgst || 0))}<div class="muted">${escapeHtml(cgstRate)}%</div></td>
-        <td class="num">${escapeHtml(money(i.sgst || 0))}<div class="muted">${escapeHtml(sgstRate)}%</div></td>
+        ${taxCells}
         <td class="num">${escapeHtml(money(invoiceLineTotal(i)))}</td>
       </tr>
     `
@@ -1634,7 +1669,8 @@ function buildInvoiceHtml(receipt) {
     .num { text-align: right; white-space: nowrap; }
     .totals { display: grid; grid-template-columns: 1fr 260px; gap: 16px; margin-top: 12px; }
     .summary td { border-color: #e5e7eb; }
-    .payable { font-size: 16px; font-weight: 800; }
+     .payable { font-size: 16px; font-weight: 800; }
+     .no-tax { display: flex; justify-content: flex-end; }
     .footer { border-top: 1px solid #d1d5db; display: flex; justify-content: space-between; margin-top: 18px; padding-top: 10px; }
     .sign { margin-top: 36px; text-align: right; }
     @media print { .no-print { display: none; } body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
@@ -1645,7 +1681,7 @@ function buildInvoiceHtml(receipt) {
     <div>
       <div class="brand">${escapeHtml(hospital.name || 'Hospital Pharmacy')}</div>
       <div class="muted">${escapeHtml(address || 'Pharmacy counter')}</div>
-      <div class="muted">Phone: ${escapeHtml(hospital.phone || '-')} | GSTIN: ${escapeHtml(hospital.gstin || '-')}</div>
+       <div class="muted">Phone: ${escapeHtml(hospital.phone || '-')}${noGst ? '' : ` | GSTIN: ${escapeHtml(hospital.gstin || '-')}`}</div>
     </div>
     <div class="num">
       <div><strong>Invoice:</strong> ${escapeHtml(invoice.invoice_no || '-')}</div>
@@ -1654,27 +1690,27 @@ function buildInvoiceHtml(receipt) {
       <div><strong>Reference:</strong> ${escapeHtml(receipt.payment_reference || '-')}</div>
     </div>
   </div>
-  <div class="title">Pharmacy Tax Invoice</div>
+   <div class="title">${noGst ? 'Pharmacy Invoice' : 'Pharmacy Tax Invoice'}</div>
   <div class="grid">
-    <div class="box"><h3>Bill To</h3><strong>${escapeHtml(customerName)}</strong><div class="muted">${escapeHtml(customerMeta)}</div><div class="muted">GSTIN: ${escapeHtml(receipt.customer?.gstin || '-')}</div></div>
-    <div class="box"><h3>Sale Details</h3><div>Type: ${escapeHtml(receipt.type || 'Pharmacy Sale')}</div><div>Tax mode: ${escapeHtml(invoice.tax_mode || 'INCLUSIVE')}</div><div>Cashier: ${escapeHtml(receipt.cashier || '-')}</div></div>
+     <div class="box"><h3>Bill To</h3><strong>${escapeHtml(customerName)}</strong><div class="muted">${escapeHtml(customerMeta)}</div>${noGst ? '' : `<div class="muted">GSTIN: ${escapeHtml(receipt.customer?.gstin || '-')}</div>`}</div>
+     <div class="box"><h3>Sale Details</h3><div>Type: ${escapeHtml(receipt.type || 'Pharmacy Sale')}</div><div>Tax mode: ${noGst ? 'No GST' : escapeHtml(invoice.tax_mode || 'INCLUSIVE')}</div><div>Cashier: ${escapeHtml(receipt.cashier || '-')}</div></div>
   </div>
   <table>
-    <thead><tr><th>#</th><th>Item Description</th><th>MRP</th><th>Disc.</th><th>Sale Price</th><th>Taxable Value</th><th>CGST</th><th>SGST</th><th>Total Amount</th></tr></thead>
-    <tbody>${itemRows || '<tr><td colspan="9" class="muted">No items</td></tr>'}</tbody>
+     <thead><tr><th>#</th><th>Item Description</th><th>MRP</th><th>Disc.</th><th>Sale Price</th>${noGst ? '' : '<th>Taxable Value</th><th>CGST</th><th>SGST</th>'}<th>Total Amount</th></tr></thead>
+    <tbody>${itemRows || `<tr><td colspan="${noGst ? 6 : 9}" class="muted">No items</td></tr>`}</tbody>
   </table>
-  <div class="totals">
-    <div>
-      <strong>GST Summary</strong>
-      <table class="summary"><thead><tr><th>Rate</th><th>Taxable</th><th>Tax</th></tr></thead><tbody>${gstRows || '<tr><td colspan="3" class="muted">No tax rows</td></tr>'}</tbody></table>
-    </div>
-    <table class="summary">
-      <tbody>
-        <tr><td>Subtotal</td><td class="num">${escapeHtml(money(invoice.subtotal))}</td></tr>
-        <tr><td>Taxable value</td><td class="num">${escapeHtml(money(invoice.taxable_value))}</td></tr>
-        <tr><td>CGST</td><td class="num">${escapeHtml(money(invoice.cgst_total))}</td></tr>
-        <tr><td>SGST</td><td class="num">${escapeHtml(money(invoice.sgst_total))}</td></tr>
-        <tr><td>IGST</td><td class="num">${escapeHtml(money(invoice.igst_total))}</td></tr>
+   <div class="${noGst ? 'totals no-tax' : 'totals'}">
+     ${noGst ? '' : `<div>
+       <strong>GST Summary</strong>
+       <table class="summary"><thead><tr><th>Rate</th><th>Taxable</th><th>Tax</th></tr></thead><tbody>${gstRows || '<tr><td colspan="3" class="muted">No tax rows</td></tr>'}</tbody></table>
+     </div>`}
+     <table class="summary">
+       <tbody>
+         <tr><td>Subtotal</td><td class="num">${escapeHtml(money(invoice.subtotal))}</td></tr>
+         ${noGst ? '' : `<tr><td>Taxable value</td><td class="num">${escapeHtml(money(invoice.taxable_value))}</td></tr>
+         <tr><td>CGST</td><td class="num">${escapeHtml(money(invoice.cgst_total))}</td></tr>
+         <tr><td>SGST</td><td class="num">${escapeHtml(money(invoice.sgst_total))}</td></tr>
+         <tr><td>IGST</td><td class="num">${escapeHtml(money(invoice.igst_total))}</td></tr>`}
         <tr><td>Discount</td><td class="num">${escapeHtml(money(invoice.discount))}</td></tr>
         <tr><td class="payable">Payable</td><td class="num payable">${escapeHtml(money(invoice.payable))}</td></tr>
       </tbody>
@@ -1688,21 +1724,22 @@ function buildInvoiceHtml(receipt) {
 function ReceiptModal({ receipt, onClose }) {
   if (!receipt) return null
   const invoice = receipt.invoice || {}
+  const noGst = invoice.gst_included === false || receipt.type === 'Prescription Sale'
   const print = () => {
     printHtml(buildInvoiceHtml(receipt), `Invoice ${invoice.invoice_no || ''}`).catch(() => toast.error('Could not open the print dialog'))
   }
   const rows = invoice.items || receipt.items || []
   return (
-    <Modal open={!!receipt} onClose={onClose} title="Pharmacy Tax Invoice" size="xl">
+    <Modal open={!!receipt} onClose={onClose} title={noGst ? 'Pharmacy Invoice' : 'Pharmacy Tax Invoice'} size="xl">
       <div className="rounded-lg bg-white p-5 text-slate-950">
         <div className="flex flex-col gap-3 border-b-2 border-slate-950 pb-3 md:flex-row md:items-start md:justify-between">
-          <div><div className="text-lg font-bold">{receipt.hospital?.name || 'Hospital Pharmacy'}</div><div className="text-xs text-slate-600">{[receipt.hospital?.address, receipt.hospital?.city, receipt.hospital?.state, receipt.hospital?.pincode].filter(Boolean).join(', ') || 'Pharmacy counter'}</div><div className="text-xs text-slate-600">GSTIN: {receipt.hospital?.gstin || '-'}</div></div>
+          <div><div className="text-lg font-bold">{receipt.hospital?.name || 'Hospital Pharmacy'}</div><div className="text-xs text-slate-600">{[receipt.hospital?.address, receipt.hospital?.city, receipt.hospital?.state, receipt.hospital?.pincode].filter(Boolean).join(', ') || 'Pharmacy counter'}</div>{!noGst && <div className="text-xs text-slate-600">GSTIN: {receipt.hospital?.gstin || '-'}</div>}</div>
           <div className="text-xs md:text-right"><div className="font-bold">{invoice.invoice_no || '-'}</div><div>{invoiceDate()}</div><div>{receipt.payment_method || '-'}</div></div>
         </div>
-        <div className="my-3 border border-slate-950 py-1 text-center text-xs font-bold uppercase">Pharmacy Tax Invoice</div>
+         <div className="my-3 border border-slate-950 py-1 text-center text-xs font-bold uppercase">{noGst ? 'Pharmacy Invoice' : 'Pharmacy Tax Invoice'}</div>
         <div className="grid grid-cols-1 gap-3 text-xs md:grid-cols-2">
           <div className="border border-slate-300 p-2"><div className="font-bold uppercase">Bill To</div><div>{receipt.patient ? `${receipt.patient.first_name} ${receipt.patient.last_name}` : receipt.customer?.name || 'Walk-in customer'}</div><div className="text-slate-600">{receipt.patient?.uhid || receipt.customer?.phone || '-'}</div></div>
-          <div className="border border-slate-300 p-2"><div className="font-bold uppercase">Sale</div><div>{receipt.type || 'Pharmacy Sale'}</div><div>Tax mode: {invoice.tax_mode || 'INCLUSIVE'}</div><div>Reference: {receipt.payment_reference || '-'}</div></div>
+           <div className="border border-slate-300 p-2"><div className="font-bold uppercase">Sale</div><div>{receipt.type || 'Pharmacy Sale'}</div><div>Tax mode: {noGst ? 'No GST' : invoice.tax_mode || 'INCLUSIVE'}</div><div>Reference: {receipt.payment_reference || '-'}</div></div>
         </div>
         <div className="mt-3 overflow-x-auto">
           <table className="w-full border-collapse text-xs">
@@ -1712,9 +1749,9 @@ function ReceiptModal({ receipt, onClose }) {
                 <th className="border p-2 text-right">MRP</th>
                 <th className="border p-2 text-right">Disc.</th>
                 <th className="border p-2 text-right">Sale Price</th>
-                <th className="border p-2 text-right">Taxable Value</th>
-                <th className="border p-2 text-right">CGST</th>
-                <th className="border p-2 text-right">SGST</th>
+                 {!noGst && <th className="border p-2 text-right">Taxable Value</th>}
+                 {!noGst && <th className="border p-2 text-right">CGST</th>}
+                 {!noGst && <th className="border p-2 text-right">SGST</th>}
                 <th className="border p-2 text-right">Total Amount</th>
               </tr>
             </thead>
@@ -1729,9 +1766,9 @@ function ReceiptModal({ receipt, onClose }) {
                   <td className="border p-2 text-right">{money(invoiceMrpTotal(i))}</td>
                   <td className="border p-2 text-right">{money(invoiceDiscount(i))}</td>
                   <td className="border p-2 text-right">{money(invoiceSalePrice(i))}</td>
-                  <td className="border p-2 text-right">{money(i.taxable_value || 0)}</td>
-                  <td className="border p-2 text-right">{money(i.cgst || 0)}<div className="text-[10px] text-slate-500">{Number(i.gst_pct || 0) / 2}%</div></td>
-                  <td className="border p-2 text-right">{money(i.sgst || 0)}<div className="text-[10px] text-slate-500">{Number(i.gst_pct || 0) / 2}%</div></td>
+                   {!noGst && <td className="border p-2 text-right">{money(i.taxable_value || 0)}</td>}
+                   {!noGst && <td className="border p-2 text-right">{money(i.cgst || 0)}<div className="text-[10px] text-slate-500">{Number(i.gst_pct || 0) / 2}%</div></td>}
+                   {!noGst && <td className="border p-2 text-right">{money(i.sgst || 0)}<div className="text-[10px] text-slate-500">{Number(i.gst_pct || 0) / 2}%</div></td>}
                   <td className="border p-2 text-right">{money(invoiceLineTotal(i))}</td>
                 </tr>
               ))}
@@ -1739,8 +1776,8 @@ function ReceiptModal({ receipt, onClose }) {
           </table>
         </div>
         <div className="mt-3 grid grid-cols-1 gap-3 text-xs md:grid-cols-[1fr_260px]">
-          <div className="border border-slate-300 p-2"><div className="font-bold">GST Summary</div>{(invoice.gst_summary || []).map(g => <div key={g.gst_pct} className="flex justify-between"><span>{g.gst_pct}% taxable {money(g.taxable_value)}</span><span>{money(g.tax)}</span></div>)}</div>
-          <div className="space-y-1 border border-slate-300 p-2"><div className="flex justify-between"><span>Taxable</span><span>{money(invoice.taxable_value)}</span></div><div className="flex justify-between"><span>CGST</span><span>{money(invoice.cgst_total)}</span></div><div className="flex justify-between"><span>SGST</span><span>{money(invoice.sgst_total)}</span></div><div className="flex justify-between"><span>IGST</span><span>{money(invoice.igst_total)}</span></div><div className="flex justify-between"><span>Discount</span><span>{money(invoice.discount)}</span></div><div className="flex justify-between border-t pt-1 text-base font-bold"><span>Payable</span><span>{money(invoice.payable)}</span></div></div>
+           {!noGst && <div className="border border-slate-300 p-2"><div className="font-bold">GST Summary</div>{(invoice.gst_summary || []).map(g => <div key={g.gst_pct} className="flex justify-between"><span>{g.gst_pct}% taxable {money(g.taxable_value)}</span><span>{money(g.tax)}</span></div>)}</div>}
+           <div className="space-y-1 border border-slate-300 p-2">{!noGst && <><div className="flex justify-between"><span>Taxable</span><span>{money(invoice.taxable_value)}</span></div><div className="flex justify-between"><span>CGST</span><span>{money(invoice.cgst_total)}</span></div><div className="flex justify-between"><span>SGST</span><span>{money(invoice.sgst_total)}</span></div><div className="flex justify-between"><span>IGST</span><span>{money(invoice.igst_total)}</span></div></>}<div className="flex justify-between"><span>Discount</span><span>{money(invoice.discount)}</span></div><div className="flex justify-between border-t pt-1 text-base font-bold"><span>Payable</span><span>{money(invoice.payable)}</span></div></div>
         </div>
       </div>
       <div className="grid grid-cols-2 gap-8 mt-12 mb-4 text-xs text-slate-600"><div className="border-t border-slate-500 pt-2 text-center">Customer signature</div><div className="border-t border-slate-500 pt-2 text-center">Authorized signatory and pharmacy stamp</div></div>

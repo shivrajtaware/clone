@@ -2,7 +2,14 @@
 import axios from 'axios'
 import { getServerOrigin } from './runtimeConfig'
 
-const resolveApiUrl = () => import.meta.env.VITE_API_URL || (getServerOrigin() ? `${getServerOrigin()}/api` : '/api')
+// Prefer the runtime server URL injected by the desktop client. In a browser
+// deployment, /api keeps requests on the same host as the UI, which is
+// important when the backend hostname is only resolvable inside Docker/LAN.
+const resolveApiUrl = () => {
+  const serverOrigin = getServerOrigin()
+  if (serverOrigin) return `${serverOrigin}/api`
+  return import.meta.env.VITE_API_URL || '/api'
+}
 
 const resolveRefreshUrl = () => {
   const baseURL = resolveApiUrl()

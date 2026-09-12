@@ -1,13 +1,15 @@
-# MediCore HMS Tauri LAN deployment
+# MediCore HMS Tauri LAN deployment (Windows, no Docker)
 
 MediCore HMS is a central-server hospital system. Install the Tauri client on each laptop, but keep PostgreSQL and the Node backend on the hospital server. All laptops must point to the same backend URL; do not run a separate database on client laptops.
 
 ## One-time server setup
 
-1. Keep the server PC and all laptops on the same LAN/VLAN. A static IP is not required: the Tauri client automatically discovers a MediCore server on the local subnet by checking port `5000` and validating `/health`.
-2. Allow inbound TCP port `5000` in the server PC firewall.
-3. Set `PUBLIC_SERVER_URL` and the allowed frontend origin in `backend/.env` if required by the deployment.
-4. Build/deploy the backend and frontend on the server. Confirm `http://SERVER_IP:5000/health` works from another laptop.
+1. On the server PC, keep the existing `backend/.env` and database. Do not run any reset or seed command.
+2. Right-click `installation\setup-windows-no-docker.cmd` and choose **Run as administrator**. It starts the installed PostgreSQL Windows service, applies only pending Prisma migrations, opens TCP port `5000` on the Private profile, and registers the backend for Windows logon.
+3. Confirm `http://localhost:5000/health` and `http://SERVER_IP:5000/health` both return a healthy MediCore response.
+4. Keep the server PC and all laptops on the same LAN/VLAN. The Tauri client first tries the configured hostname/localhost, then automatically discovers a MediCore server on the local subnet by checking port `5000` and validating `/health`.
+
+The setup script does not delete, reset, reseed, or import inventory data. The current pharmacy backup is kept under `backups\pharmacy`.
 
 ## Build the Windows client
 
@@ -20,7 +22,7 @@ npm run tauri:build
 
 The installer is produced under `frontend/src-tauri/target/release/bundle/`.
 
-Before building, edit `frontend/src-tauri/server-config.json` to the server PC's Windows hostname. This is only a fast first attempt; automatic subnet discovery is the fallback when DHCP changes the server IP:
+Before building, run the server setup above. It writes the server PC's Windows hostname into `frontend/src-tauri/server-config.json`. This is only a fast first attempt; automatic subnet discovery is the fallback when DHCP changes the server IP:
 
 ```json
 { "serverUrl": "http://HOSPITAL-SERVER:5000" }
@@ -28,7 +30,7 @@ Before building, edit `frontend/src-tauri/server-config.json` to the server PC's
 
 ## Adding another laptop
 
-Install the generated Tauri installer. The client opens the central server URL and stores no pharmacy or patient database locally. To change the server later, edit `server-config.json` in the installed app's data/resource location, or set the `MEDICORE_SERVER_URL` environment variable before launching the client.
+Install the generated Tauri installer. The client opens the central server URL and stores no pharmacy or patient database locally. To change the server later, place a `server-config.json` beside the installed EXE, or set the `MEDICORE_SERVER_URL` environment variable before launching the client.
 
 ## Network rules
 

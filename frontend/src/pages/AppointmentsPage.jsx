@@ -126,9 +126,10 @@ const resolveSocketUrl = () => {
     } catch {}
   }
 
-  const { protocol, hostname } = window.location
-  const host = hostname === 'localhost' || hostname === '127.0.0.1' ? 'localhost' : hostname
-  return `${protocol}//${host}:5000`
+  // The production reverse proxy serves the API and Socket.IO on the same
+  // origin as the UI. Do not append :5000: that port is not exposed to the
+  // browser in the client-hosted deployment.
+  return window.location.origin
 }
 
 const newMedicine = () => ({

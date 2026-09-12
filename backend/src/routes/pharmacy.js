@@ -199,6 +199,51 @@ const audit = (tx, req, action, recordId, newValues, oldValues = null) => tx.aud
   },
 });
 
+// Create a stock batch and keep the parent SKU total in sync. This is shared
+// by the normal batch endpoint and the atomic medicine-create flow.
+const createBatchForItem = async (tx, item, input, req) => {
+  const { batch_no, mfg_date, expiry_date, quantity_in, pack_quantity, loose_quantity, mrp, selling_price, cost_price, taxable_rate, gst_pct, cgst_amt, sgst_amt, igst_amt, purchase_total, supplier } = input || {};
+  const quantity = pack_quantity !== undefined || loose_quantity !== undefined
+    ? (toFloat(pack_quantity || 0, 'pack_quantity') * packSize(item)) + toFloat(loose_quantity || 0, 'loose_quantity')
+    : toFloat(quantity_in, 'quantity_in');
+  if (quantity <= 0) throw new HttpError(400, 'Received quantity must be greater than zero');
+  const mrpValue = toFloat(mrp, 'mrp');
+  const gstPct = requireGstPercent(gst_pct, 'GST %');
+  const retailPrice = resolveSellingPrice(mrpValue, selling_price);
+  if (retailPrice > mrpValue) throw new HttpError(400, 'Selling price cannot be greater than MRP');
+  const purchaseTax = purchaseTaxFields({
+    quantity,
+    packQuantity: pack_quantity || 0,
+    looseQuantity: loose_quantity || 0,
+    unitsPerPack: packSize(item),
+    costPrice: cost_price ? toFloat(cost_price, 'cost_price') : null,
+    taxableRate: taxable_rate ? toFloat(taxable_rate, 'taxable_rate') : null,
+    gstPct,
+    cgstAmt: cgst_amt ? toFloat(cgst_amt, 'cgst_amt') : null,
+    sgstAmt: sgst_amt ? toFloat(sgst_amt, 'sgst_amt') : null,
+    igstAmt: igst_amt ? toFloat(igst_amt, 'igst_amt') : null,
+    purchaseTotal: purchase_total ? toFloat(purchase_total, 'purchase_total') : null,
+  });
+  const created = await tx.drugBatch.create({
+    data: {
+      id: uuidv4(),
+      item_id: item.id,
+      batch_no,
+      mfg_date: mfg_date ? toDate(mfg_date, 'mfg_date') : null,
+      expiry_date: toDate(expiry_date, 'expiry_date'),
+      quantity_in: quantity,
+      quantity_rem: quantity,
+      mrp: mrpValue,
+      selling_price: retailPrice,
+      ...purchaseTax,
+      supplier,
+    },
+  });
+  const updatedItem = await tx.pharmacyItem.update({ where: { id: item.id }, data: { current_stock: { increment: quantity } } });
+  await audit(tx, req, 'BATCH_RECEIVED', created.id, { item_id: item.id, batch_no, quantity, stock_display: stockLabel(quantity, item), supplier, purchase: purchaseTax });
+  return { batch: created, item: updatedItem };
+};
+
 const enrichItem = (item) => {
   const now = new Date();
   const expiryLimit = new Date(now.getTime() + EXPIRY_WINDOW_DAYS * 86400000);
@@ -250,6 +295,7 @@ const enrichItem = (item) => {
 
 const calculateInvoice = (lines = [], options = {}) => {
   const taxMode = options.tax_mode === 'EXCLUSIVE' ? 'EXCLUSIVE' : 'INCLUSIVE';
+  const includeGst = options.include_gst !== false;
   const discountPct = Number(options.discount_pct || 0);
   const discountAmt = Number(options.discount_amt || 0);
   const patientState = options.patient_state || options.place_of_supply || '';
@@ -263,7 +309,7 @@ const calculateInvoice = (lines = [], options = {}) => {
     const rate = Number(line.unit_price || line.mrp || 0);
     const mrpPerUnit = Number(line.mrp_per_unit ?? line.mrp_unit ?? rate);
     const lineMrpTotal = qty * mrpPerUnit;
-    const rawGst = Number(line.gst_pct ?? options.default_gst_pct ?? 0);
+    const rawGst = includeGst ? Number(line.gst_pct ?? options.default_gst_pct ?? 0) : 0;
     const gstPct = Number.isFinite(rawGst) && rawGst >= 0 && rawGst <= 100 ? rawGst : 0;
     const gross = qty * rate;
     const base = taxMode === 'INCLUSIVE' ? gross / (1 + gstPct / 100) : gross;
@@ -288,25 +334,28 @@ const calculateInvoice = (lines = [], options = {}) => {
       line_total: toMoney(taxMode === 'INCLUSIVE' ? gross : gross + tax),
     };
   });
-  const discount = discountAmt || (subtotal * discountPct / 100);
-  const payable = (taxMode === 'INCLUSIVE' ? subtotal : taxable + taxTotal) - discount;
+  const calculatedDiscount = discountAmt || (subtotal * discountPct / 100);
+  const discount = Math.min(subtotal, Math.max(0, calculatedDiscount));
+  const payable = Math.max(0, (taxMode === 'INCLUSIVE' ? subtotal : taxable + taxTotal) - discount);
   return {
     invoice_no: options.invoice_no || `PH-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`,
     tax_mode: taxMode,
+    gst_included: includeGst,
     items,
     subtotal: toMoney(subtotal),
     taxable_value: toMoney(taxable),
     discount: toMoney(discount),
+    discount_pct: toMoney(discountPct),
     tax_total: toMoney(taxTotal),
     cgst_total: toMoney(items.reduce((sum, i) => sum + i.cgst, 0)),
     sgst_total: toMoney(items.reduce((sum, i) => sum + i.sgst, 0)),
     igst_total: toMoney(items.reduce((sum, i) => sum + i.igst, 0)),
     payable: toMoney(payable),
-    gst_summary: [...new Set(items.map(i => i.gst_pct))].sort((a, b) => a - b).map(rate => ({
+    gst_summary: includeGst ? [...new Set(items.map(i => i.gst_pct))].sort((a, b) => a - b).map(rate => ({
       gst_pct: rate,
       taxable_value: toMoney(items.filter(i => i.gst_pct === rate).reduce((sum, i) => sum + i.taxable_value, 0)),
       tax: toMoney(items.filter(i => i.gst_pct === rate).reduce((sum, i) => sum + i.cgst + i.sgst + i.igst, 0)),
-    })).filter(row => row.taxable_value > 0 || row.tax > 0),
+    })).filter(row => row.taxable_value > 0 || row.tax > 0) : [],
   };
 };
 
@@ -608,10 +657,18 @@ router.get('/inventory/:id', async (req, res) => {
 });
 
 router.post('/inventory', async (req, res) => {
-  const data = sanitizeModelInput('PharmacyItem', req.body, {
+  const { opening_stock, ...itemInput } = req.body || {};
+  const data = sanitizeModelInput('PharmacyItem', itemInput, {
     exclude: ['id', 'hospital_id', 'created_at', 'current_stock'],
   });
-  const item = await prisma.pharmacyItem.create({ data: { id: uuidv4(), hospital_id: req.hospitalId, ...data } });
+  const item = await prisma.$transaction(async (tx) => {
+    const created = await tx.pharmacyItem.create({ data: { id: uuidv4(), hospital_id: req.hospitalId, ...data } });
+    if (opening_stock) {
+      const result = await createBatchForItem(tx, created, opening_stock, req);
+      return result.item;
+    }
+    return created;
+  });
   res.status(201).json({ success: true, data: item });
 });
 
@@ -815,49 +872,10 @@ router.put('/inventory/:id/stock', async (req, res) => {
 });
 
 router.post('/inventory/:id/batch', async (req, res) => {
-  const { batch_no, mfg_date, expiry_date, quantity_in, pack_quantity, loose_quantity, mrp, selling_price, cost_price, taxable_rate, gst_pct, cgst_amt, sgst_amt, igst_amt, purchase_total, supplier } = req.body;
   const batch = await prisma.$transaction(async (tx) => {
     const item = await tx.pharmacyItem.findFirst({ where: { id: req.params.id, hospital_id: req.hospitalId } });
     if (!item) throw new HttpError(404, 'Medicine not found');
-    const quantity = pack_quantity !== undefined || loose_quantity !== undefined
-      ? (toFloat(pack_quantity || 0, 'pack_quantity') * packSize(item)) + toFloat(loose_quantity || 0, 'loose_quantity')
-      : toFloat(quantity_in, 'quantity_in');
-    if (quantity <= 0) throw new HttpError(400, 'Received quantity must be greater than zero');
-    const mrpValue = toFloat(mrp, 'mrp');
-    const gstPct = requireGstPercent(gst_pct, 'GST %');
-    const retailPrice = resolveSellingPrice(mrpValue, selling_price);
-    if (retailPrice > mrpValue) throw new HttpError(400, 'Selling price cannot be greater than MRP');
-    const purchaseTax = purchaseTaxFields({
-      quantity,
-      packQuantity: pack_quantity || 0,
-      looseQuantity: loose_quantity || 0,
-      unitsPerPack: packSize(item),
-      costPrice: cost_price ? toFloat(cost_price, 'cost_price') : null,
-      taxableRate: taxable_rate ? toFloat(taxable_rate, 'taxable_rate') : null,
-      gstPct,
-      cgstAmt: cgst_amt ? toFloat(cgst_amt, 'cgst_amt') : null,
-      sgstAmt: sgst_amt ? toFloat(sgst_amt, 'sgst_amt') : null,
-      igstAmt: igst_amt ? toFloat(igst_amt, 'igst_amt') : null,
-      purchaseTotal: purchase_total ? toFloat(purchase_total, 'purchase_total') : null,
-    });
-    const created = await tx.drugBatch.create({
-      data: {
-        id: uuidv4(),
-        item_id: req.params.id,
-        batch_no,
-        mfg_date: mfg_date ? toDate(mfg_date, 'mfg_date') : null,
-        expiry_date: toDate(expiry_date, 'expiry_date'),
-        quantity_in: quantity,
-        quantity_rem: quantity,
-        mrp: mrpValue,
-        selling_price: retailPrice,
-        ...purchaseTax,
-        supplier,
-      },
-    });
-    await tx.pharmacyItem.update({ where: { id: req.params.id }, data: { current_stock: { increment: quantity } } });
-    await audit(tx, req, 'BATCH_RECEIVED', created.id, { item_id: req.params.id, batch_no, quantity, stock_display: stockLabel(quantity, item), supplier, purchase: purchaseTax });
-    return created;
+    return (await createBatchForItem(tx, item, req.body, req)).batch;
   });
   res.status(201).json({ success: true, data: batch });
 });
@@ -924,6 +942,11 @@ router.post('/inventory/:id/adjust', async (req, res) => {
 
 router.post('/dispense', async (req, res) => {
   const { patient_id, prescription_id, items, gst = {}, payment_method, payment_reference, sale_type, customer = {} } = req.body;
+  const isPrescriptionSale = Boolean(prescription_id);
+  const requestedDiscountPct = Number(gst.discount_pct || 0);
+  if (!Number.isFinite(requestedDiscountPct) || requestedDiscountPct < 0 || requestedDiscountPct > 100) {
+    throw new HttpError(400, 'Discount must be between 0 and 100 percent');
+  }
   const paymentMethod = norm(payment_method).toUpperCase();
   if (paymentMethod && !PAYMENT_MODES.has(paymentMethod)) throw new HttpError(400, 'Invalid payment mode');
   const dispenseItems = (Array.isArray(items) ? items : []).map(i => ({
@@ -951,6 +974,9 @@ router.post('/dispense', async (req, res) => {
     phone: String(customer.phone || req.body.customer_phone || '').trim(),
     gstin: String(customer.gstin || '').trim(),
   };
+  if (!resolvedPatientId && !walkInCustomer.name) {
+    throw new HttpError(400, 'Customer name is required for walk-in pharmacy billing');
+  }
 
   const dispense = await prisma.$transaction(async (tx) => {
     if (prescription_id) {
@@ -972,10 +998,12 @@ router.post('/dispense', async (req, res) => {
       if (!i.item_id) {
         const quantity = toFloat(i.quantity || 1, 'quantity');
         const unitPrice = toFloat(i.unit_price, 'unit_price');
-        const gstPct = i.gst_pct === undefined || i.gst_pct === '' ? 0 : toFloat(i.gst_pct, 'gst_pct');
+        // Prescription-only medicines are billable at the pharmacist-entered
+        // price, but GST is not collected or requested for them.
+        const gstPct = isPrescriptionSale ? 0 : (i.gst_pct === undefined || i.gst_pct === '' ? 0 : toFloat(i.gst_pct, 'gst_pct'));
         if (quantity <= 0) throw new HttpError(400, `Quantity must be greater than zero for ${i.item_name || 'unregistered medicine'}`);
         if (unitPrice <= 0) throw new HttpError(400, `Selling price must be greater than zero for ${i.item_name || 'unregistered medicine'}`);
-        if (gstPct < 0 || gstPct > 100) throw new HttpError(400, `GST must be between 0 and 100 for ${i.item_name || 'unregistered medicine'}`);
+        if (!isPrescriptionSale && (gstPct < 0 || gstPct > 100)) throw new HttpError(400, `GST must be between 0 and 100 for ${i.item_name || 'unregistered medicine'}`);
         expandedItems.push({
           id: uuidv4(), item_id: null, quantity, batch_no: null,
           mrp_per_unit: unitPrice, unit_price: unitPrice, gst_pct: gstPct,
@@ -1038,7 +1066,12 @@ router.post('/dispense', async (req, res) => {
         await tx.drugBatch.updateMany({ where: { item_id: i.item_id, batch_no: i.batch_no }, data: { quantity_rem: { decrement: i.quantity } } });
       }
     }
-    const invoice = calculateInvoice(expandedItems, { ...gst, invoice_no: dispense_no, payment_method: paymentMethod });
+    const invoice = calculateInvoice(expandedItems, {
+      ...gst,
+      include_gst: isPrescriptionSale ? false : gst.include_gst,
+      invoice_no: dispense_no,
+      payment_method: paymentMethod,
+    });
     let bill = null;
     let payment = null;
     if (resolvedPatientId) {
@@ -1056,6 +1089,7 @@ router.post('/dispense', async (req, res) => {
           type: 'PHARMACY',
           status: 'PAID',
           subtotal,
+          discount_pct: Number(invoice.discount_pct || 0),
           discount_amt,
           tax_amt,
           total_amt,

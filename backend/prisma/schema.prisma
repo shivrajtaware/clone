@@ -901,8 +901,13 @@ model Bill {
   id           String     @id @default(uuid())
   hospital_id  String
   bill_no      String     @unique
-  patient_id   String
+  patient_id   String?
+  patient_name String?
+  patient_address String?
+  patient_mobile  String?
   admission_id String?
+  admission_date DateTime?
+  bill_date    DateTime?
   appointment_id String?  @unique
   type         BillType
   status       BillStatus @default(DRAFT)
@@ -914,6 +919,7 @@ model Bill {
   paid_amt     Decimal    @default(0)
   due_amt      Decimal    @default(0)
   payment_mode String?
+  doctor_name  String?
   insurance_id String?
   notes        String?
   created_at   DateTime   @default(now())
@@ -921,7 +927,7 @@ model Bill {
   items        BillItem[]
   lab_order    LabOrder?
   hospital     Hospital   @relation(fields: [hospital_id], references: [id])
-  patient      Patient    @relation(fields: [patient_id], references: [id])
+  patient      Patient?   @relation(fields: [patient_id], references: [id])
   payments     Payment[]
   admission    Admission?  @relation(fields: [admission_id], references: [id])
   appointment  Appointment? @relation(fields: [appointment_id], references: [id])
@@ -938,6 +944,14 @@ model BillItem {
   quantity    Decimal @default(1)
   unit_price  Decimal
   total       Decimal
+  item_id     String?
+  company_name String?
+  quantity_unit String?
+  pack        String?
+  batch_no    String?
+  expiry_date DateTime?
+  mrp         Decimal?
+  sale_rate   Decimal?
   bill        Bill    @relation(fields: [bill_id], references: [id])
 
   @@map("bill_items")
